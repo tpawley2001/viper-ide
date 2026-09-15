@@ -157,6 +157,36 @@ def main(argv: list[str]) -> int:
         return {"interpreter": win.interp.label(), "infobar": bar_text, "lint": errors, "screenshot": str(shot)}
 
     check("gui", gui)
+
+    def update_feed():
+        from . import __version__, updater
+
+        release, errors = updater.check()
+        if release is None and not os.environ.get("VIPER_SELFTEST_UPDATE"):
+            return {"skipped": "no update feed reachable", "errors": errors}  # informational outside the E2E run
+        assert release, errors
+        state["release"] = release
+        return {"base": release.base, "published": release.version, "running": __version__}
+
+    check("update_feed", update_feed)
+
+    if os.environ.get("VIPER_SELFTEST_UPDATE") and "release" in state:
+        # End to end: download + verify + hand to the installer. The installer may close
+        # this process, so results are written first and the outcome is read from its log.
+        def update_apply():
+            from . import updater
+
+            installer = updater.download(state["release"], dest_dir=work)
+            log = out_path.with_name("update_install.log")
+            state["installer"] = (installer, log)
+            return {"installer": str(installer), "log": str(log)}
+
+        check("update_download", update_apply)
+
     results["ok"] = all(c["ok"] for c in results["checks"].values())
     out_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
+    if results["ok"] and "installer" in state:
+        from . import updater
+
+        updater.install(*state["installer"]).wait(timeout=600)
     return 0 if results["ok"] else 1

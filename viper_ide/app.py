@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout
                              QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
                              QPushButton, QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
-from . import APP_NAME, ORG_NAME, __version__, imports, interpreters, intel, packages
+from . import APP_NAME, ORG_NAME, __version__, imports, interpreters, intel, packages, updater
 from .debugui import DebugPanel, DebugSession
 from .dialogs import CommandPalette, RenamePreviewDialog, SettingsDialog
 from .editor import EditorPage
@@ -22,7 +22,8 @@ from .icons import app_icon_pixmap, icon
 from .intel import IntelEngine
 from .packagesui import PackagesPanel, PythonDownloadDialog
 from .panels import ExplorerPanel, OutlinePanel, ProblemsPanel, SearchPanel, list_project_files, pick_folder
-from .paths import data_dir
+from .paths import data_dir, is_frozen
+from .updateui import UpdateDialog
 from .runner import ConsolePanel, RunPanel, TerminalPanel, activated_env
 from .settings import Settings
 from .theme import apply_app_theme, theme
@@ -83,6 +84,8 @@ class MainWindow(QMainWindow):
         self._restore(open_paths or [])
         self._update_welcome()
         QTimer.singleShot(0, self.refresh_interpreters)
+        if settings.get("auto_check_updates") and is_frozen() and IS_WIN:
+            QTimer.singleShot(4000, lambda: self.check_for_updates(silent=True))
 
     # ================================================================== layout
     def _build_central(self) -> None:
@@ -293,6 +296,7 @@ class MainWindow(QMainWindow):
         a["packages"] = A("Manage Packages", lambda: self._show_dock(self.packages_dock), "Ctrl+Alt+P", "package")
         a["restart_console"] = A("Restart Python Console", self.console.restart)
         a["about"] = A(f"About {APP_NAME}", self.about)
+        a["check_updates"] = A("Check for Updates...", lambda: self.check_for_updates(silent=False))
         a["data_folder"] = A("Open Viper Data Folder", lambda: self._reveal(str(data_dir())))
 
     def _build_menus(self) -> None:
@@ -335,7 +339,7 @@ class MainWindow(QMainWindow):
         self.interp_menu.aboutToShow.connect(self._fill_interp_menu)
         menu("&Python", [self.interp_menu, a["create_venv"], a["download_python"], None, a["check_missing"],
                          a["install_missing"], a["install_reqs"], a["packages"]])
-        menu("&Help", [a["palette"], None, a["data_folder"], a["about"]])
+        menu("&Help", [a["palette"], None, a["check_updates"], a["data_folder"], a["about"]])
 
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("Main")
@@ -548,7 +552,7 @@ class MainWindow(QMainWindow):
             page = self.new_file()
             try:
                 page.editor.load(path)
-            except OSError as e:
+            except (OSError, UnicodeError) as e:
                 self.close_tab(page, force=True)
                 QMessageBox.warning(self, "Open File", f"Couldn't open {path}:\n{e}")
                 return None
@@ -593,7 +597,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Format on save skipped: {str(ex).splitlines()[0]}", 6000)
         try:
             e.save()
-        except OSError as ex:
+        except (OSError, UnicodeError) as ex:
             QMessageBox.warning(self, "Save", f"Couldn't save {e.path}:\n{ex}")
             return False
         if e.path not in self.watcher.files():
@@ -616,7 +620,7 @@ class MainWindow(QMainWindow):
         old = e.path
         try:
             e.save(path)
-        except OSError as ex:
+        except (OSError, UnicodeError) as ex:
             QMessageBox.warning(self, "Save As", f"Couldn't save {path}:\n{ex}")
             return False
         if old and old in self.watcher.files():
@@ -683,7 +687,8 @@ class MainWindow(QMainWindow):
             line, col = e.getCursorPosition()
             try:
                 e.load(path)
-            except OSError:
+            except (OSError, UnicodeError) as ex:
+                page.info.show_message("warning", f"Couldn't reload this file: {html.escape(str(ex))}", tag="disk")
                 return
             e.setCursorPosition(min(line, e.lines() - 1), col)
             page.info.clear("disk")
@@ -960,14 +965,75 @@ class MainWindow(QMainWindow):
         page.info.clear("imports")
         self.check_imports(page, force=True)
 
-    def install_packages(self, dists: list[str], then=None) -> None:
+    def ensure_installable(self, then, what: str) -> None:
+        """Call ``then(interp)`` with an interpreter pip is allowed to install into.
+
+        OS-managed Pythons (PEP 668: Debian/Ubuntu, Homebrew, ...) refuse pip installs, so
+        for those offer a virtual environment, switch to it, and continue there.
+        """
         if not self.interp:
             self.download_python()
             return
-        interp = self.interp
+        if self.interp.externally_managed:
+            self._offer_venv_for(self.interp, what, then)
+        else:
+            then(self.interp)
+
+    def _offer_venv_for(self, base, what: str, then) -> None:
+        if self.project:
+            target, scope = os.path.join(self.project, ".venv"), "this project"
+        else:
+            target = str(data_dir() / "venvs" / f"py{base.short_version.replace('.', '')}")
+            scope = "files outside a project"
+        existing = interpreters.probe(str(interpreters.venv_python(target)))
+        if existing:
+            self._adopt_interpreter(existing)
+            then(existing)
+            return
+        answer = QMessageBox.question(
+            self, "Create Virtual Environment",
+            f"{base.label()} is managed by your operating system, so pip isn't allowed to install {what} into "
+            f"it.\n\nCreate a virtual environment at\n{target}\nand install there? Viper will use it for {scope} "
+            f"from now on.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.busy_label.setText("Creating virtual environment...")
+        self._pip_busy(True)
+        self.statusBar().showMessage(f"Creating a virtual environment at {target}...")
+
+        def done(interp):
+            self._pip_busy(self.pip.busy)
+            if not interp:
+                QMessageBox.warning(self, "Create Virtual Environment",
+                                    f"The environment at {target} was created but its Python doesn't run.")
+                return
+            self._adopt_interpreter(interp)
+            then(interp)
+
+        def failed(msg):
+            self._pip_busy(self.pip.busy)
+            QMessageBox.warning(self, "Create Virtual Environment", f"Couldn't create the environment:\n\n{msg}")
+
+        run_async(interpreters.create_venv, base, target, on_done=done, on_error=failed)
+
+    def _adopt_interpreter(self, interp) -> None:
+        if not any(norm(i.path) == norm(interp.path) for i in self.interpreters):
+            self.interpreters.insert(0, interp)
+        self.set_interpreter(interp)
+        self.statusBar().showMessage(f"Now using {interp.label()}", 6000)
+
+    def install_packages(self, dists: list[str], then=None) -> None:
+        self.ensure_installable(lambda interp: self._pip_install(interp, dists, then), ", ".join(dists))
+
+    def _pip_install(self, interp, dists: list[str], then=None) -> None:
         self.statusBar().showMessage(f"Installing {', '.join(dists)} into {interp.label()}...")
 
         def done(ok: bool, text: str):
+            if not ok and "externally-managed-environment" in text and not interp.is_venv:
+                # The probe missed the marker (unusual layout): learn it and take the venv route.
+                interp.externally_managed = True
+                self._offer_venv_for(interp, ", ".join(dists), lambda i: self._pip_install(i, dists, then))
+                return
             if ok:
                 self.statusBar().showMessage(f"Installed {', '.join(dists)}", 6000)
                 self._packages_changed()
@@ -1046,8 +1112,9 @@ class MainWindow(QMainWindow):
                 self.global_bar.clear("requirements")
                 return
             fname = os.path.basename(source)
-            install = (lambda: self.pip.install_requirements(interp.path, source, lambda ok, _t: self._packages_changed())) \
-                if source.endswith(".txt") else (lambda: self.install_packages(missing))
+            install = (lambda: self.ensure_installable(
+                lambda i: self.pip.install_requirements(i.path, source, lambda ok, _t: self._packages_changed()),
+                fname)) if source.endswith(".txt") else (lambda: self.install_packages(missing))
             self.global_bar.show_message(
                 "info", f"{len(missing)} of this project's requirements ({html.escape(fname)}) aren't installed in "
                         f"{html.escape(interp.label())}: <b>{html.escape(', '.join(missing[:8]))}</b>"
@@ -1505,6 +1572,45 @@ class MainWindow(QMainWindow):
             for p in self.pages():
                 self._request_lint(p)
                 self.check_imports(p, force=True)
+
+    # ================================================================ updates
+    def check_for_updates(self, silent: bool = False) -> None:
+        if not silent:
+            self.statusBar().showMessage("Checking for updates...", 5000)
+        run_async(updater.check, self.settings, on_done=lambda result: self._update_checked(result, silent),
+                  on_error=lambda msg: silent or QMessageBox.warning(self, "Check for Updates", msg))
+
+    def _update_checked(self, result, silent: bool) -> None:
+        release, errors = result
+        if release is None:
+            if not silent:
+                QMessageBox.information(self, "Check for Updates", "Couldn't reach an update server:\n\n"
+                                        + "\n".join(errors[-3:]))
+            return
+        if not release.newer_than(__version__):
+            if not silent:
+                QMessageBox.information(self, "Check for Updates",
+                                        f"You're on the latest version ({__version__}).")
+            return
+        if silent and self.settings.get("skipped_update") == release.version:
+            return
+        if not silent:
+            self._open_update(release)
+            return
+        if self.global_bar.isVisible() and self.global_bar.tag != "update":
+            self.statusBar().showMessage(f"Viper IDE {release.version} is available: Help > Check for Updates", 20000)
+            return
+        self.global_bar.show_message(
+            "info", f"<b>Viper IDE {html.escape(release.version)}</b> is available (you have {__version__}).",
+            [("Update Now", lambda: self._open_update(release), True),
+             ("Later", lambda: self.global_bar.clear("update"), False)], tag="update")
+
+    def _open_update(self, release) -> None:
+        result = UpdateDialog(release, self.settings, self).exec()
+        if result in (UpdateDialog.INSTALLING, UpdateDialog.SKIPPED):
+            self.global_bar.clear("update")
+        if result == UpdateDialog.INSTALLING:
+            self.close()  # saves the session and prompts for unsaved files; the installer relaunches us
 
     def about(self) -> None:
         interp = self.interp.label() if self.interp else "none selected"

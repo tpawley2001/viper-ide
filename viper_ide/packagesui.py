@@ -24,6 +24,9 @@ class PackagesPanel(QWidget):
         self.get_project = get_project
         self._rows: list[dict] = []
         self._latest: dict[str, str] = {}
+        # Set by the main window: ensure_installable(continuation, what) hands the continuation an
+        # interpreter pip may write to (switching to a venv for OS-managed Pythons).
+        self.ensure_installable = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
@@ -127,12 +130,17 @@ class PackagesPanel(QWidget):
         if ok:
             self.packages_changed.emit()
 
+    def _installable(self, fn, what: str) -> None:
+        if self.ensure_installable:
+            self.ensure_installable(fn, what)
+        elif (interp := self._need_interp()):
+            fn(interp)
+
     def install(self) -> None:
-        interp = self._need_interp()
         specs = self.spec.text().split()
-        if interp and specs:
-            self.pip.install(interp.path, specs, self._after_change)
+        if specs:
             self.spec.clear()
+            self._installable(lambda i: self.pip.install(i.path, specs, self._after_change), ", ".join(specs))
 
     def lookup(self) -> None:
         name = requirement_name(self.spec.text().split()[0]) if self.spec.text().split() else None
@@ -163,10 +171,10 @@ class PackagesPanel(QWidget):
         self.pip.list_installed(interp.path, done, outdated=True)
 
     def upgrade_selected(self) -> None:
-        interp = self._need_interp()
         names = self._selected_names()
-        if interp and names:
-            self.pip.install(interp.path, names, self._after_change, upgrade=True)
+        if names:
+            self._installable(lambda i: self.pip.install(i.path, names, self._after_change, upgrade=True),
+                              ", ".join(names))
 
     def uninstall_selected(self) -> None:
         interp = self._need_interp()
@@ -185,7 +193,8 @@ class PackagesPanel(QWidget):
             path, _ = QFileDialog.getOpenFileName(self, "Requirements file", default,
                                                   "Requirements (*.txt);;All files (*)")
         if path:
-            self.pip.install_requirements(interp.path, path, self._after_change)
+            self._installable(lambda i: self.pip.install_requirements(i.path, path, self._after_change),
+                              os.path.basename(path))
 
     def export_requirements(self) -> None:
         interp = self._need_interp()

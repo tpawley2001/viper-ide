@@ -77,6 +77,15 @@ def test_probe_and_find_missing(tmp_path):
     assert res["dists_missing"] == ["no-such-dist-qq"]
 
 
+def test_probe_flags_os_managed_python():
+    assert not interpreters.probe(sys.executable).externally_managed  # the test venv
+    managed = next((i for i in map(interpreters.probe, interpreters.candidate_paths()) if i and i.externally_managed),
+                   None)
+    if managed is None:
+        pytest.skip("no PEP 668 (externally managed) Python on this machine")
+    assert not managed.is_venv
+
+
 def test_lint_and_outline():
     code = "import os\n\ndef f(x):\n    return y\n\nclass A:\n    def m(self): pass\nCONST = 3\n"
     items = intel.lint(code, "t.py")

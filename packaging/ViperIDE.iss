@@ -29,6 +29,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=yes
 CloseApplications=yes
+RestartApplications=yes
 LicenseFile=..\LICENSE
 
 [Tasks]

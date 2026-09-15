@@ -59,6 +59,9 @@ class SettingsDialog(QDialog):
         self.run_cwd = combo([("The file's folder", "file"), ("The project folder", "project")], s.get("run_cwd"))
         self.clear_output = check("clear_output_on_run", "Clear output before each run")
         self.save_before_run = check("save_before_run", "Save the file before running")
+        self.auto_updates = check("auto_check_updates", "Check for Viper updates at startup")
+        self.update_urls = QLineEdit(", ".join(s.get("update_urls") or []))
+        self.update_urls.setPlaceholderText("Optional: extra update server URLs, comma separated")
 
         for label, widget in (("Theme", self.theme), ("Editor font", self.font), ("Font size", self.font_size),
                               ("Tab width", self.tab_width), ("Ruler column (0 = off)", self.edge),
@@ -66,7 +69,8 @@ class SettingsDialog(QDialog):
                               ("", self.lint), ("Missing packages", self.check_imports),
                               ("When packages are missing", self.auto_install), ("Formatter", self.formatter),
                               ("", self.format_on_save), ("Debugger", self.jmc), ("Run programs from", self.run_cwd),
-                              ("", self.clear_output), ("", self.save_before_run)):
+                              ("", self.clear_output), ("", self.save_before_run),
+                              ("Updates", self.auto_updates), ("Update server URLs", self.update_urls)):
             form.addRow(label, widget)
 
         lay = QVBoxLayout(self)
@@ -88,6 +92,8 @@ class SettingsDialog(QDialog):
             "formatter": self.formatter.currentData(), "format_on_save": self.format_on_save.isChecked(),
             "just_my_code": self.jmc.isChecked(), "run_cwd": self.run_cwd.currentData(),
             "clear_output_on_run": self.clear_output.isChecked(), "save_before_run": self.save_before_run.isChecked(),
+            "auto_check_updates": self.auto_updates.isChecked(),
+            "update_urls": [u.strip() for u in self.update_urls.text().split(",") if u.strip()],
         }
         for k, v in values.items():
             s._data[k] = v

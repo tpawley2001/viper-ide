@@ -143,3 +143,132 @@ def test_runtime_module_not_found_offers_install(window, app, tmp_path, monkeypa
     window.run_file(False)
     assert wait(app, lambda: asked, 60)
     assert "PyYAML" in asked[0]
+
+
+def test_os_managed_python_installs_into_project_venv(window, app, tmp_path, monkeypatch):
+    from viper_ide import interpreters
+
+    managed = next((i for i in map(interpreters.probe, interpreters.candidate_paths()) if i and i.externally_managed),
+                   None)
+    if managed is None:
+        pytest.skip("no PEP 668 (externally managed) Python on this machine")
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes)
+    window.set_interpreter(managed, remember=False)
+    done = []
+    window.install_packages(["six"], then=done.append)
+    assert wait(app, lambda: done, 300), "install never finished"
+    assert done == [True] and asked and "managed by your operating system" in asked[0]
+    assert window.interp.is_venv and os.path.normcase(window.interp.path).startswith(
+        os.path.normcase(str(tmp_path / ".venv")))
+    assert list((tmp_path / ".venv").rglob("six.py"))
+
+
+def test_silent_update_check_offers_newer_and_respects_skip(window, app, monkeypatch):
+    from viper_ide import updater
+
+    release = updater.Release(version="99.0.0", file="ViperIDE_Setup_99.0.0.exe", sha256="a" * 64, size=1,
+                              notes="", published="", base="http://feed.test")
+    monkeypatch.setattr(updater, "check", lambda settings=None, timeout=5.0: (release, []))
+    window.global_bar.clear()
+    window.check_for_updates(silent=True)
+    assert wait(app, lambda: window.global_bar.isVisible() and "99.0.0" in window.global_bar.label.text(), 10)
+    window.global_bar.clear()
+    window.settings._data["skipped_update"] = "99.0.0"
+    window.check_for_updates(silent=True)
+    wait(app, lambda: False, 0.5)
+    assert not window.global_bar.isVisible()
+
+
+@pytest.mark.parametrize("replace_all", [False, True])
+@pytest.mark.parametrize("replacement", [r"\2", r"\g<missing>"])
+def test_invalid_regex_replacement_keeps_document(window, replacement, replace_all):
+    page = window.new_file()
+    e, bar = page.editor, page.find_bar
+    e.setText("hello hello")
+    bar.regex.setChecked(True)
+    bar.find_edit.setText("(hello)")
+    e.setSelection(0, 0, 0, 5)
+    bar.replace_edit.setText(replacement)
+    (bar.replace_all if replace_all else bar.replace_one)()
+    assert e.text() == "hello hello"
+    assert "Invalid replacement" in bar.count.text()
+
+
+def test_replace_one_does_not_replace_trailing_empty_match(window):
+    page = window.new_file()
+    e, bar = page.editor, page.find_bar
+    e.setText("hello")
+    bar.regex.setChecked(True)
+    bar.find_edit.setText(".*")
+    e.setSelection(0, 0, 0, 5)
+    bar.replace_edit.setText("world")
+    bar.replace_one()
+    assert e.text() == "world"
+    e.undo()
+    assert e.text() == "hello"
+
+
+def test_find_count_tracks_document_edits(window, app):
+    page = window.new_file()
+    e, bar = page.editor, page.find_bar
+    e.setText("hello")
+    bar.find_edit.setText("hello")
+    bar.open()
+    app.processEvents()
+    assert bar.count.text() == "1 match"
+    e.setText("hello hello")
+    assert bar.count.text() == "2 matches"
+
+
+def test_encoding_save_failure_keeps_original_and_unsaved_edits(window, tmp_path, monkeypatch):
+    path = tmp_path / "encoded.py"
+    original = b"# coding: latin-1\nvalue = 'hello'\r\n"
+    path.write_bytes(original)
+    page = window.open_file(str(path))
+    page.editor.set_text_undoable("# coding: latin-1\nvalue = '🐍'\n")
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    assert not window.save(page)
+    assert path.read_bytes() == original
+    assert page.editor.isModified()
+    assert page.editor.encoding == "iso-8859-1"
+    assert warnings
+
+
+@pytest.mark.parametrize("original", [
+    b"# coding: latin-1\r\nvalue = '\xe9\x80'\r\n",
+    b"\xef\xbb\xbfprint('hello')\r\n",
+])
+def test_editor_save_preserves_encoding_bom_and_line_endings(window, tmp_path, original):
+    path = tmp_path / "encoded.py"
+    path.write_bytes(original)
+    page = window.open_file(str(path))
+    assert page.editor.eol_name() == "CRLF"
+    assert window.save(page)
+    assert path.read_bytes() == original
+    assert not page.editor.isModified()
+
+
+def test_failed_save_as_preserves_editor_path_and_encoding(window, tmp_path, monkeypatch):
+    from viper_ide import fileio
+
+    path = tmp_path / "original.py"
+    path.write_bytes(b"value = '\xe9'\n")
+    page = window.open_file(str(path))
+    page.editor.set_text_undoable("value = '🐍'\n")
+    destination = tmp_path / "destination.py"
+    destination.write_bytes(b"existing file")
+
+    def fail(*args):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(fileio.os, "replace", fail)
+    with pytest.raises(OSError, match="disk failure"):
+        page.editor.save(str(destination))
+    assert page.editor.path == str(path)
+    assert page.editor.encoding == "cp1252"
+    assert page.editor.isModified()
+    assert destination.read_bytes() == b"existing file"
+    assert path.read_bytes() == b"value = '\xe9'\n"

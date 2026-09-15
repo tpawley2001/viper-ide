@@ -37,6 +37,9 @@ DEFAULTS: dict = {
     "window_geometry": "",
     "window_state": "",
     "ignored_missing": [],
+    "auto_check_updates": True,
+    "update_urls": [],             # extra update feeds tried before the built-in ones
+    "skipped_update": "",
 }
 
 

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdi
                              QToolTip, QVBoxLayout, QWidget)
 
 from .icons import kind_pixmap
+from .fileio import atomic_write, decode_source, encode_source
 from .theme import mono_font
 from .widgets import InfoBar
 
@@ -230,15 +231,8 @@ class CodeEditor(QsciScintilla):
 
     def load(self, path: str) -> None:
         data = Path(path).read_bytes()
-        self.bom = data.startswith(b"\xef\xbb\xbf")
-        text = None
-        for enc in ("utf-8", "cp1252", "latin-1"):
-            try:
-                text = data.decode("utf-8-sig" if enc == "utf-8" else enc)
-                self.encoding = enc
-                break
-            except UnicodeDecodeError:
-                continue
+        text, encoding, bom = decode_source(data)
+        self.encoding, self.bom = encoding, bom
         crlf = text.count("\r\n")
         lf = text.count("\n") - crlf
         if crlf or lf:
@@ -251,15 +245,9 @@ class CodeEditor(QsciScintilla):
 
     def save(self, path: str | None = None) -> None:
         path = os.path.abspath(path or self.path)
-        text = self.text()
-        try:
-            data = text.encode(self.encoding)
-        except UnicodeEncodeError:
-            self.encoding = "utf-8"
-            data = text.encode("utf-8")
-        if self.bom and self.encoding == "utf-8":
-            data = b"\xef\xbb\xbf" + data
-        Path(path).write_bytes(data)
+        data, encoding = encode_source(self.text(), self.encoding, self.bom)
+        atomic_write(path, data)
+        self.encoding = encoding
         self.path = path
         self.setModified(False)
         self.saved_mtime = os.stat(path).st_mtime
@@ -789,6 +777,7 @@ class FindBar(QFrame):
         self.replace_row.hide()
         self.find_edit.installEventFilter(self)
         self.replace_edit.installEventFilter(self)
+        self.editor.textChanged.connect(lambda: self.isVisible() and self._update_count())
         self.hide()
 
     def _toggle(self, text, tip):
@@ -854,6 +843,8 @@ class FindBar(QFrame):
             return False
         e = self.editor
         line = index = -1
+        if self._pattern() is None:
+            return False
         if e.hasSelectedText():
             lf, if_, lt, it = e.getSelection()
             if incremental or not forward:
@@ -867,9 +858,14 @@ class FindBar(QFrame):
     def replace_one(self) -> None:
         e = self.editor
         pat = self._pattern()
-        if pat and e.hasSelectedText() and pat.fullmatch(e.selectedText()):
-            replacement = pat.sub(self.replace_edit.text(), e.selectedText()) if self.regex.isChecked() \
-                else self.replace_edit.text()
+        match = pat.fullmatch(e.selectedText()) if pat and e.hasSelectedText() else None
+        if match:
+            try:
+                replacement = match.expand(self.replace_edit.text()) \
+                    if self.regex.isChecked() else self.replace_edit.text()
+            except (re.error, IndexError) as ex:
+                self.count.setText(f"Invalid replacement: {ex}")
+                return
             e.replaceSelectedText(replacement)
         self.find(True)
 
@@ -878,7 +874,11 @@ class FindBar(QFrame):
         if not pat:
             return
         rep = self.replace_edit.text()
-        new, n = pat.subn(rep if self.regex.isChecked() else (lambda _m: rep), self.editor.text())
+        try:
+            new, n = pat.subn(rep if self.regex.isChecked() else (lambda _m: rep), self.editor.text())
+        except (re.error, IndexError) as ex:
+            self.count.setText(f"Invalid replacement: {ex}")
+            return
         if n:
             self.editor.set_text_undoable(new)
         self.count.setText(f"Replaced {n}")

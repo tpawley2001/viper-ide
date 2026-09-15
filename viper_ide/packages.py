@@ -142,8 +142,8 @@ class PipRunner(QObject):
             self._queue[:0] = [PipJob(job.interpreter, ["-m", "ensurepip", "--upgrade"], "Installing pip"), job]
         else:
             if not ok and "externally-managed-environment" in text:
-                self.output.emit("\nThis is a system-managed Python. Create a virtual environment for the "
-                                 "project (Python > Create Virtual Environment) and install there.\n")
+                self.output.emit("\nThis Python is managed by the operating system, so pip won't install into "
+                                 "it. Viper will offer a virtual environment instead.\n")
             if not job.quiet:
                 self.output.emit(f"{'Done' if ok else 'Failed'}: {job.title}\n\n")
             self.job_finished.emit(job.title, ok)

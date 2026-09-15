@@ -32,7 +32,8 @@ missing** to *Ask* (default), *Install automatically* or *Never offer*.
 - **Editor** (QScintilla): Python highlighting, code folding, indent guides, brace matching,
   auto-closing brackets and quotes, smart indentation, multi-cursor (`Ctrl+Shift+L`, Alt+drag),
   highlighting of other occurrences, find/replace with regex, line moving and duplication,
-  comment toggling, CRLF/LF and encoding preservation, and reload when a file changes on disk.
+  comment toggling, CRLF/LF and encoding preservation (including Python encoding declarations),
+  atomic saves, and reload when a file changes on disk.
 - **Code intelligence** (Jedi, run against *your* interpreter so installed packages are
   understood): completion, signature help, hover docs, go to definition (`F12` / Ctrl+click),
   find references, project-wide rename with diff preview.
@@ -73,6 +74,28 @@ missing** to *Ask* (default), *Install automatically* or *Never offer*.
 Run `ViperIDE_Setup_<version>.exe`. It installs for the current user by default (no admin
 prompt); choose "Install for all users" in the first dialog to install system-wide. Windows 10/11 x64.
 
+### Updates
+
+Installed copies update themselves. A few seconds after launch Viper reads `version.json` from the
+update server and, if a newer version is published, shows an **Update Now** bar (or use
+**Help → Check for Updates**). The installer is downloaded, **refused unless its sha256 matches the
+manifest**, then run silently. Viper closes (prompting for unsaved files) and reopens on the new
+version.
+
+Feeds are tried in order: **Settings → Update server URLs**, the `VIPER_UPDATE_URLS` environment
+variable (comma separated), then the built-in home server (`http://update.example.lan/viper/windows`, then its
+Tailscale address). Turn off the startup check in Settings.
+
+Publish a build (after `scripts/build_on_winbox.sh`):
+
+```bash
+scripts/publish_update.sh "What changed"      # copies dist/ViperIDE_Setup_<version>.exe + writes version.json
+```
+
+It writes the installer and then, atomically, `version.json` (`versionName`, `versionCode`, `file`,
+`sha256`, `size`, `publishedAt`, `notes`) into `VIPER_UPDATE_DIR` (default `/var/www/html/viper/windows`),
+and keeps the three newest installers. Bump `__version__` in `viper_ide/__init__.py` before building.
+
 Settings live in `%APPDATA%\ViperIDE\settings.json`. Downloaded Pythons, formatter tools and
 the log (`viper.log`) are in `%LOCALAPPDATA%\ViperIDE`.
 
@@ -100,11 +123,13 @@ that lack a system libGL.
 |---|---|
 | `viper_ide/app.py` | Main window: tabs, docks, actions, interpreter selection, smart-install flow, run/debug |
 | `viper_ide/editor.py` | QScintilla editor, find bar, editor page |
+| `viper_ide/fileio.py` | Source encoding detection and atomic document saves |
 | `viper_ide/imports.py` | Import extraction, import→PyPI mapping, requirements/PEP 723 parsing, PyPI lookups |
 | `viper_ide/interpreters.py` | Interpreter discovery/probing, venv creation, python.org download and install |
 | `viper_ide/packages.py` | Queued pip runner and on-demand formatter tools |
 | `viper_ide/intel.py` | Jedi + pyflakes worker thread, outline |
 | `viper_ide/helpers/` | Scripts that run inside the *user's* interpreter: `find_missing.py`, `viper_dbg.py` (debugger backend, JSON over a localhost socket) |
+| `viper_ide/updater.py`, `updateui.py` | Remote self-update: feed check, sha256-verified download, silent installer hand-off |
 | `viper_ide/selftest.py` | `--selftest`, which also runs from the frozen build |
 | `packaging/` | PyInstaller spec, Inno Setup script, `build_windows.ps1` |
 

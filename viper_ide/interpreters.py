@@ -20,11 +20,14 @@ IS_WIN = os.name == "nt"
 USER_AGENT = "ViperIDE"
 
 PROBE = (
-    "import sys,json,os,importlib.util as u;"
+    "import sys,json,os,sysconfig,importlib.util as u;"
+    "bp=getattr(sys,'base_prefix',sys.prefix);"
     "print(json.dumps({'version':sys.version.split()[0],'prefix':sys.prefix,"
-    "'base_prefix':getattr(sys,'base_prefix',sys.prefix),'executable':sys.executable,"
+    "'base_prefix':bp,'executable':sys.executable,"
     "'pip':u.find_spec('pip') is not None,'bits':64 if sys.maxsize>2**32 else 32,"
-    "'conda':os.path.exists(os.path.join(sys.prefix,'conda-meta'))}))"
+    "'conda':os.path.exists(os.path.join(sys.prefix,'conda-meta')),"
+    # PEP 668: the OS (apt, Homebrew, ...) owns this install and pip refuses to write to it.
+    "'ext':sys.prefix==bp and os.path.exists(os.path.join(sysconfig.get_path('stdlib'),'EXTERNALLY-MANAGED'))}))"
 )
 
 
@@ -38,6 +41,7 @@ class Interpreter:
     has_pip: bool = True
     bits: int = 64
     managed: bool = False
+    externally_managed: bool = False
 
     @property
     def kind(self) -> str:
@@ -77,6 +81,7 @@ def probe(path: str, timeout: float = 10.0) -> Interpreter | None:
         path=os.path.abspath(path), version=info["version"], prefix=info["prefix"],
         is_venv=os.path.normcase(info["prefix"]) != os.path.normcase(info["base_prefix"]),
         is_conda=info["conda"], has_pip=info["pip"], bits=info["bits"], managed=managed,
+        externally_managed=bool(info.get("ext")),
     )
 
 
@@ -215,10 +220,28 @@ def discover(project: str | None = None, extra: list[str] | None = None) -> list
 
 def create_venv(base: Interpreter | str, target: str) -> Interpreter | None:
     exe = base.path if isinstance(base, Interpreter) else base
-    proc = subprocess.run([exe, "-m", "venv", target], capture_output=True, text=True,
-                          timeout=300, env=child_env(), **subprocess_flags())
+
+    def run(cmd):
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=child_env(),
+                              **subprocess_flags())
+
+    proc = run([exe, "-m", "venv", target])
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout).strip() or "python -m venv failed")
+        error = (proc.stderr or proc.stdout).strip() or "python -m venv failed"
+        if "ensurepip" not in error:
+            raise RuntimeError(error)
+        # Debian/Ubuntu ship Python without ensurepip (python3-venv not installed):
+        # build the environment without pip, then bootstrap pip from PyPA.
+        shutil.rmtree(target, ignore_errors=True)
+        proc = run([exe, "-m", "venv", "--without-pip", target])
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout).strip() or error)
+        get_pip = downloads_dir() / "get-pip.py"
+        download("https://bootstrap.pypa.io/get-pip.py", get_pip)
+        proc = run([str(venv_python(target)), str(get_pip)])
+        if proc.returncode != 0:
+            raise RuntimeError("Created the environment but couldn't install pip into it:\n"
+                               + (proc.stderr or proc.stdout).strip())
     return probe(str(venv_python(target)))
 
 
