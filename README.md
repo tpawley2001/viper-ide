@@ -104,8 +104,10 @@ manifest**, then run silently. Viper closes (prompting for unsaved files) and re
 version.
 
 Feeds are tried in order: **Settings → Update server URLs**, the `VIPER_UPDATE_URLS` environment
-variable (comma separated), then the built-in home server (`http://update.example.lan/viper/windows`, then its
-Tailscale address). Turn off the startup check in Settings.
+variable (comma separated), then the feeds built into the installer. To point your own builds at your
+server, create `viper_ide/resources/update_feeds.txt` (one base URL per line, `#` comments) before
+building. It's gitignored, so a build from a clean checkout has no built-in feed and only checks the
+URLs you configure. Turn off the startup check in Settings.
 
 Publish a build (after `scripts/build_on_winbox.sh`):
 

@@ -54,15 +54,23 @@ def test_version_ordering():
 
 def test_bases_normalise_and_dedupe(monkeypatch):
     monkeypatch.setenv("VIPER_UPDATE_URLS", "example.com/viper/, http://example.com/viper")
+    monkeypatch.setattr(updater, "default_bases", lambda: ["built.in/feed", "http://example.com/viper"])
     got = updater.bases(Settings(update_urls=["https://x.test/feed/version.json"]))
-    assert got[:2] == ["https://x.test/feed", "http://example.com/viper"]
-    assert got[2:] == updater.DEFAULT_BASES
+    assert got == ["https://x.test/feed", "http://example.com/viper", "http://built.in/feed"]
+
+
+def test_default_bases_file(tmp_path, monkeypatch):
+    feeds = tmp_path / "update_feeds.txt"
+    monkeypatch.setattr(updater, "FEEDS_FILE", feeds)
+    assert updater.default_bases() == []  # a source checkout ships no feeds
+    feeds.write_text("# comment\n\nhttp://a.test/viper\n  http://b.test/viper  \n")
+    assert updater.default_bases() == ["http://a.test/viper", "http://b.test/viper"]
 
 
 def test_check_falls_through_dead_base_and_downloads(server, tmp_path, monkeypatch):
     root, base = server
     publish(root)
-    monkeypatch.setattr(updater, "DEFAULT_BASES", [])
+    monkeypatch.setattr(updater, "default_bases", lambda: [])
     release, errors = updater.check(Settings(update_urls=[dead_base(), base]), timeout=2)
     assert release and release.base == base and len(errors) == 1
     assert release.newer_than("1.0.0") and not release.newer_than("9.1.0")
@@ -74,7 +82,7 @@ def test_check_falls_through_dead_base_and_downloads(server, tmp_path, monkeypat
 def test_checksum_mismatch_is_discarded(server, tmp_path, monkeypatch):
     root, base = server
     publish(root, sha="0" * 64)
-    monkeypatch.setattr(updater, "DEFAULT_BASES", [])
+    monkeypatch.setattr(updater, "default_bases", lambda: [])
     release, _ = updater.check(Settings(update_urls=[base]))
     with pytest.raises(updater.UpdateError):
         updater.download(release, dest_dir=tmp_path)
@@ -85,6 +93,6 @@ def test_checksum_mismatch_is_discarded(server, tmp_path, monkeypatch):
 def test_unsafe_manifest_file_rejected(server, monkeypatch, file):
     root, base = server
     (root / "version.json").write_text(json.dumps({"versionName": "9.0", "file": file, "sha256": "a" * 64}))
-    monkeypatch.setattr(updater, "DEFAULT_BASES", [])
+    monkeypatch.setattr(updater, "default_bases", lambda: [])
     release, errors = updater.check(Settings(update_urls=[base]))
     assert release is None and "unsafe" in errors[0]

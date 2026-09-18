@@ -23,11 +23,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
-from .paths import downloads_dir
+from .paths import downloads_dir, resource
 
-# Home update server: LAN first, Tailscale when away. Add more (e.g. a public
-# route) in Settings > Update server URLs or VIPER_UPDATE_URLS (comma separated).
-DEFAULT_BASES = ["http://update.example.lan/viper/windows", "http://update.example.net/viper/windows"]
+# Built-in feeds come from resources/update_feeds.txt (one URL per line, # comments),
+# which a build ships but the repository doesn't: each distributor points their builds
+# at their own server. Users add more in Settings > Update server URLs or
+# VIPER_UPDATE_URLS (comma separated).
+FEEDS_FILE = resource("update_feeds.txt")
+
+
+def default_bases() -> list[str]:
+    try:
+        lines = FEEDS_FILE.read_text("utf-8").splitlines()
+    except OSError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
 USER_AGENT = f"ViperIDE/{__version__}"
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9._-]+\.exe$")
 
@@ -74,7 +84,7 @@ def bases(settings=None) -> list[str]:
     configured = list(settings.get("update_urls") or []) if settings is not None else []
     configured += os.environ.get("VIPER_UPDATE_URLS", "").split(",")
     seen, out = set(), []
-    for b in configured + DEFAULT_BASES:
+    for b in configured + default_bases():
         n = _normalise(b)
         if n and n not in seen:
             seen.add(n)
