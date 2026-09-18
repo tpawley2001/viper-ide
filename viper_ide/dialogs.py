@@ -1,4 +1,4 @@
-"""Settings, command palette, and refactoring preview dialogs."""
+"""Settings, command palette, and diff preview dialogs."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
@@ -62,6 +62,13 @@ class SettingsDialog(QDialog):
         self.auto_updates = check("auto_check_updates", "Check for Viper updates at startup")
         self.update_urls = QLineEdit(", ".join(s.get("update_urls") or []))
         self.update_urls.setPlaceholderText("Optional: extra update server URLs, comma separated")
+        self.ai_url = QLineEdit(s.get("ai_base_url"))
+        self.ai_url.setPlaceholderText("e.g. https://api.openai.com/v1 or http://localhost:8080/v1")
+        self.ai_key = QLineEdit(s.get("ai_api_key"))
+        self.ai_key.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self.ai_key.setPlaceholderText("Blank for local servers (or set OPENAI_API_KEY)")
+        self.ai_model = QLineEdit(s.get("ai_model"))
+        self.ai_model.setPlaceholderText("e.g. gpt-4.1-mini, or pick one in the AI Assistant panel")
 
         for label, widget in (("Theme", self.theme), ("Editor font", self.font), ("Font size", self.font_size),
                               ("Tab width", self.tab_width), ("Ruler column (0 = off)", self.edge),
@@ -70,7 +77,9 @@ class SettingsDialog(QDialog):
                               ("When packages are missing", self.auto_install), ("Formatter", self.formatter),
                               ("", self.format_on_save), ("Debugger", self.jmc), ("Run programs from", self.run_cwd),
                               ("", self.clear_output), ("", self.save_before_run),
-                              ("Updates", self.auto_updates), ("Update server URLs", self.update_urls)):
+                              ("Updates", self.auto_updates), ("Update server URLs", self.update_urls),
+                              ("AI server URL", self.ai_url), ("AI API key", self.ai_key),
+                              ("AI model", self.ai_model)):
             form.addRow(label, widget)
 
         lay = QVBoxLayout(self)
@@ -94,6 +103,8 @@ class SettingsDialog(QDialog):
             "clear_output_on_run": self.clear_output.isChecked(), "save_before_run": self.save_before_run.isChecked(),
             "auto_check_updates": self.auto_updates.isChecked(),
             "update_urls": [u.strip() for u in self.update_urls.text().split(",") if u.strip()],
+            "ai_base_url": self.ai_url.text().strip(), "ai_api_key": self.ai_key.text().strip(),
+            "ai_model": self.ai_model.text().strip(),
         }
         for k, v in values.items():
             s._data[k] = v
@@ -174,21 +185,30 @@ class CommandPalette(QDialog):
             cb()
 
 
-class RenamePreviewDialog(QDialog):
-    def __init__(self, parent, diff: str, files: int):
+class DiffPreviewDialog(QDialog):
+    def __init__(self, parent, title: str, heading: str, diff: str, apply_label: str = "Apply"):
         super().__init__(parent)
-        self.setWindowTitle("Rename Symbol - Preview")
+        self.setWindowTitle(title)
         self.resize(820, 560)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"This rename changes {files} file{'s' if files != 1 else ''}:"))
+        label = QLabel(heading)
+        label.setWordWrap(True)
+        lay.addWidget(label)
         view = QPlainTextEdit(diff)
         view.setReadOnly(True)
+        view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         view.setFont(mono_font("", 10))
         lay.addWidget(view, 1)
         buttons = QDialogButtonBox()
-        apply = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
+        apply = buttons.addButton(apply_label, QDialogButtonBox.ButtonRole.AcceptRole)
         apply.setProperty("primary", True)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+
+class RenamePreviewDialog(DiffPreviewDialog):
+    def __init__(self, parent, diff: str, files: int):
+        super().__init__(parent, "Rename Symbol - Preview",
+                         f"This rename changes {files} file{'s' if files != 1 else ''}:", diff)

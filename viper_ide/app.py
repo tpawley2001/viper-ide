@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout
                              QPushButton, QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from . import APP_NAME, ORG_NAME, __version__, imports, interpreters, intel, packages, updater
+from .assistantui import AssistantPanel
 from .debugui import DebugPanel, DebugSession
 from .dialogs import CommandPalette, RenamePreviewDialog, SettingsDialog
 from .editor import EditorPage
@@ -170,6 +171,7 @@ class MainWindow(QMainWindow):
         self.problems = ProblemsPanel()
         self.packages_panel = PackagesPanel(self.pip, lambda: self.interp, lambda: self.project, t)
         self.debug_panel = DebugPanel(self.debug, t)
+        self.assistant = AssistantPanel(self, self.settings)
 
         self.explorer_dock = self._dock("Project", self.explorer, L, "dock_project")
         self.outline_dock = self._dock("Outline", self.outline, L, "dock_outline")
@@ -187,9 +189,13 @@ class MainWindow(QMainWindow):
             self.tabifyDockWidget(a, b)
         self.run_dock.raise_()
         self.debug_dock = self._dock("Debugger", self.debug_panel, R, "dock_debug")
+        self.assistant_dock = self._dock("AI Assistant", self.assistant, R, "dock_assistant")
+        self.assistant_dock.hide()  # restoreState() brings it back if it was open last session
+        self._assistant_models_loaded = False
+        self.assistant_dock.visibilityChanged.connect(self._assistant_visible)
         self.resizeDocks([self.explorer_dock], [270], Qt.Orientation.Horizontal)
         self.resizeDocks([self.run_dock], [250], Qt.Orientation.Vertical)
-        self.resizeDocks([self.debug_dock], [380], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.debug_dock, self.assistant_dock], [380, 420], Qt.Orientation.Horizontal)
 
     def _act(self, text, slot, shortcut=None, icon_name=None, tip=None, checkable=False) -> QAction:
         a = QAction(text, self)
@@ -267,6 +273,9 @@ class MainWindow(QMainWindow):
         a["references"] = A("Find References", ed(lambda e: self.intel_request(e, "references")), "Shift+F12")
         a["rename"] = A("Rename Symbol...", ed(self.rename_symbol), "F2")
         a["docs"] = A("Show Documentation", ed(lambda e: self.intel_request(e, "hover", docs=True)), "Ctrl+Q")
+        a["assistant"] = A("AI Assistant", self.show_assistant, "Ctrl+Shift+A", "assistant",
+                           "AI Assistant (Ctrl+Shift+A)")
+        a["ask_ai"] = A("Ask AI to Edit...", ed(lambda e: self.show_assistant(with_file=True)), "Ctrl+I")
 
         a["run"] = A("Run File", lambda: self.run_file(False), "F5", "run", "Run the current file (F5)")
         a["run_args"] = A("Run with Arguments...", lambda: self.run_file(False, ask_args=True), "Ctrl+Shift+F5")
@@ -326,12 +335,13 @@ class MainWindow(QMainWindow):
                        a["next_occ"], a["indent"], a["dedent"], None, a["format"], a["trim"]])
         view = menu("&View", [a["palette"], a["quick_open"], a["goto_line"], None])
         for dock in (self.explorer_dock, self.outline_dock, self.search_dock, self.run_dock, self.console_dock,
-                     self.terminal_dock, self.problems_dock, self.packages_dock, self.debug_dock):
+                     self.terminal_dock, self.problems_dock, self.packages_dock, self.debug_dock, self.assistant_dock):
             view.addAction(dock.toggleViewAction())
         for it in (None, a["zoom_in"], a["zoom_out"], a["zoom_reset"], None, a["wrap"], a["whitespace"], None,
                    a["theme_dark"], a["theme_light"]):
             view.addSeparator() if it is None else view.addAction(it)
-        menu("&Code", [a["complete"], a["docs"], a["goto_def"], a["references"], a["rename"], None, a["format"]])
+        menu("&Code", [a["complete"], a["docs"], a["goto_def"], a["references"], a["rename"], None, a["format"], None,
+                       a["assistant"], a["ask_ai"]])
         menu("&Run", [a["run"], a["run_args"], a["debug"], a["stop"], None, a["continue"], a["pause"],
                       a["step_over"], a["step_into"], a["step_out"], None, a["breakpoint"], a["clear_bps"], None,
                       a["run_selection"], a["run_cell"], a["restart_console"]])
@@ -347,7 +357,7 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         a = self.a
         for it in (a["new"], a["open_folder"], a["save"], None, a["run"], a["debug"], a["stop"], None, a["continue"],
-                   a["pause"], a["step_over"], a["step_into"], a["step_out"], None, a["packages"]):
+                   a["pause"], a["step_over"], a["step_into"], a["step_out"], None, a["packages"], a["assistant"]):
             tb.addSeparator() if it is None else tb.addAction(it)
         self.debug_panel.set_actions([a["continue"], a["pause"], a["step_over"], a["step_into"], a["step_out"],
                                       a["stop"]])
@@ -455,8 +465,8 @@ class MainWindow(QMainWindow):
 
     def editor_context_actions(self) -> list:
         a = self.a
-        return [a["goto_def"], a["references"], a["rename"], a["docs"], None, a["run_selection"], a["comment"],
-                a["format"]]
+        return [a["ask_ai"], None, a["goto_def"], a["references"], a["rename"], a["docs"], None, a["run_selection"],
+                a["comment"], a["format"]]
 
     def _indent_selection(self, e, indent: bool) -> None:
         lf, _, lt, it = e.getSelection()
@@ -1216,6 +1226,8 @@ class MainWindow(QMainWindow):
         self.cursor_label.setText(f"Ln {line + 1}, Col {col + 1}" + (f" ({sel} selected)" if sel else ""))
         self.eol_button.setText(e.eol_name())
         self.encoding_label.setText(e.encoding.upper().replace("CP", "Windows-") + (" BOM" if e.bom else ""))
+        if self.assistant_dock.isVisible():
+            self.assistant.update_context()
 
     def _toggle_eol(self) -> None:
         e = self.editor()
@@ -1525,7 +1537,7 @@ class MainWindow(QMainWindow):
             if act.isEnabled():
                 entries.append((act.text().replace("&", ""), act.shortcut().toString(), act.trigger))
         for dock in (self.explorer_dock, self.outline_dock, self.search_dock, self.run_dock, self.console_dock,
-                     self.terminal_dock, self.problems_dock, self.packages_dock, self.debug_dock):
+                     self.terminal_dock, self.problems_dock, self.packages_dock, self.debug_dock, self.assistant_dock):
             entries.append((f"Show {dock.windowTitle()}", "", lambda d=dock: self._show_dock(d)))
         CommandPalette(self, sorted(entries, key=lambda e: e[0]), "Type a command").exec()
 
@@ -1563,7 +1575,12 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         old_theme = self.settings.get("theme")
+        old_ai = (self.settings.get("ai_base_url"), self.settings.get("ai_api_key"))
         if SettingsDialog(self.settings, self).exec():
+            self.assistant.settings_changed()
+            if (self.settings.get("ai_base_url"), self.settings.get("ai_api_key")) != old_ai:
+                self.assistant.bar.clear("setup")
+                self.assistant.load_models()
             if self.settings.get("theme") != old_theme:
                 self.set_theme(self.settings.get("theme"))
             self._apply_editor_settings()
@@ -1572,6 +1589,18 @@ class MainWindow(QMainWindow):
             for p in self.pages():
                 self._request_lint(p)
                 self.check_imports(p, force=True)
+
+    # ============================================================== assistant
+    def show_assistant(self, with_file: bool = False) -> None:
+        self._show_dock(self.assistant_dock)
+        self.assistant.ask(with_file=with_file)
+
+    def _assistant_visible(self, visible: bool) -> None:
+        if visible:
+            self.assistant.update_context()
+            if not self._assistant_models_loaded and self.settings.get("ai_base_url"):
+                self._assistant_models_loaded = True
+                self.assistant.load_models()
 
     # ================================================================ updates
     def check_for_updates(self, silent: bool = False) -> None:
@@ -1675,6 +1704,7 @@ class MainWindow(QMainWindow):
         self.settings._data["window_state"] = bytes(self.saveState().toBase64()).decode()
         self.settings.save()
         self.stop_running()
+        self.assistant.stop()
         self.console.stop()
         self.terminal.stop()
         self.pip.cancel()

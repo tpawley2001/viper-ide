@@ -11,6 +11,7 @@ COLORS = {
     "step_over": "#56a8f5", "step_into": "#56a8f5", "step_out": "#56a8f5", "restart": "#4caf50",
     "save": "#8c8f96", "folder": "#d9a343", "file": "#8c8f96", "package": "#b07fd6", "clear": "#8c8f96",
     "search": "#8c8f96", "python": "#3574f0", "refresh": "#8c8f96", "terminal": "#8c8f96",
+    "assistant": "#b07fd6",
 }
 
 KIND_COLORS = {
@@ -134,6 +135,13 @@ def icon(name: str) -> QIcon:
         p.drawRoundedRect(QRectF(4, 6, 24, 20), 3, 3)
         p.drawPolyline(QPolygonF([QPointF(9, 12), QPointF(13, 16), QPointF(9, 20)]))
         p.drawLine(QPointF(15, 21), QPointF(22, 21))
+    elif name == "assistant":
+        p.setPen(Qt.PenStyle.NoPen)
+        for cx, cy, r in ((13, 17, 10), (24, 8, 5)):
+            p.drawPolygon(QPolygonF([QPointF(cx, cy - r), QPointF(cx + r * 0.28, cy - r * 0.28), QPointF(cx + r, cy),
+                                     QPointF(cx + r * 0.28, cy + r * 0.28), QPointF(cx, cy + r),
+                                     QPointF(cx - r * 0.28, cy + r * 0.28), QPointF(cx - r, cy),
+                                     QPointF(cx - r * 0.28, cy - r * 0.28)]))
     elif name == "python":
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(QRectF(5, 4, 14, 14), 4, 4)

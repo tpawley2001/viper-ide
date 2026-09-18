@@ -158,6 +158,42 @@ def main(argv: list[str]) -> int:
 
     check("gui", gui)
 
+    def assistant_roundtrip():
+        # A stand-in OpenAI-compatible server: exercises urllib/http.server/json in the frozen build.
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from . import assistant
+
+        reply = "<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n"
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for i in range(0, len(reply), 5):
+                    self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': reply[i:i + 5]}}]})}\n\n"
+                                     .encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            text = assistant.stream_chat(f"http://127.0.0.1:{srv.server_address[1]}/v1", "", "m",
+                                         [{"role": "user", "content": "hi"}], timeout=30)
+        finally:
+            srv.shutdown()
+        new, problems = assistant.apply_edits("x = 1\n", assistant.parse_edits(text))
+        assert new == "x = 2\n" and not problems, (text, new, problems)
+        return {"edits": 1}
+
+    check("assistant", assistant_roundtrip)
+
     def update_feed():
         from . import __version__, updater
 

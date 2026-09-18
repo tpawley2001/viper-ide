@@ -40,6 +40,10 @@ DEFAULTS: dict = {
     "auto_check_updates": True,
     "update_urls": [],             # extra update feeds tried before the built-in ones
     "skipped_update": "",
+    "ai_base_url": "",             # OpenAI-compatible endpoint, e.g. https://api.openai.com/v1
+    "ai_api_key": "",
+    "ai_model": "",
+    "ai_include_file": True,       # send the current file with each assistant message
 }
 
 
