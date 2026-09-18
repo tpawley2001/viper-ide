@@ -32,9 +32,11 @@ missing** to *Ask* (default), *Install automatically* or *Never offer*.
 Connect Viper to any **OpenAI-compatible** chat server (OpenAI, OpenRouter, llama.cpp /
 llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without leaving the editor.
 
-1. **Settings → AI server URL**: e.g. `https://api.openai.com/v1`, `http://localhost:11434/v1` (Ollama)
-   or `http://localhost:1234/v1` (LM Studio). Add an **AI API key** if the server needs one (or set
-   `OPENAI_API_KEY`). Pick the model in the panel's drop-down (the ↻ button loads the server's list) or type it.
+1. **Add a provider**: press **Manage...** in the AI Assistant panel (or **Settings → Manage AI Providers**,
+   or **Code → AI Provider**), then **Add** a preset (OpenAI, OpenRouter, Google Gemini, Groq, Mistral,
+   DeepSeek, Ollama, LM Studio, llama.cpp) or a custom server URL. Give it an API key, or the name of an
+   environment variable to read it from (presets fill in the usual one, e.g. `OPENAI_API_KEY`). **Test & Load
+   Models** checks the connection and fills the model list.
 2. Open the panel with the ✦ toolbar button (`Ctrl+Shift+A`), or select code and press **`Ctrl+I`**
    (*Ask AI to Edit*, also in the editor's right-click menu).
 3. Describe the change. The open file (and your selection) go along with the message when
@@ -43,9 +45,14 @@ llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without l
    it as **one undo step** (`Ctrl+Z` reverts all of it). Nothing changes until you apply. Blocks that don't
    match are listed, and **Ask to Fix** sends them back to the model.
 
+**Switching providers:** add as many as you like and switch from the drop-down at the top of the panel or
+**Code → AI Provider**. Each provider remembers its own model, and its key is sent only to its own server.
+Switching mid-conversation carries on the same chat with the new model. Settings from 1.2.x become a
+provider named *Default*.
+
 Follow-up messages keep the conversation, and only the latest message includes the file, so
 long chats don't resend it every time. Matching tolerates trailing whitespace, stray code fences and
-indentation shifts, and CRLF files stay CRLF. The key is stored in `settings.json` in plain text.
+indentation shifts, and CRLF files stay CRLF. Keys are stored in `settings.json` in plain text; use the environment-variable option to keep them out of it.
 
 ## Features
 
@@ -152,7 +159,7 @@ that lack a system libGL.
 | `viper_ide/packages.py` | Queued pip runner and on-demand formatter tools |
 | `viper_ide/intel.py` | Jedi + pyflakes worker thread, outline |
 | `viper_ide/helpers/` | Scripts that run inside the *user's* interpreter: `find_missing.py`, `viper_dbg.py` (debugger backend, JSON over a localhost socket) |
-| `viper_ide/assistant.py`, `assistantui.py` | AI Assistant: OpenAI-compatible streaming client, SEARCH/REPLACE edit parsing and applying, chat dock |
+| `viper_ide/assistant.py`, `assistantui.py`, `providersui.py` | AI Assistant: providers and presets, OpenAI-compatible streaming client, SEARCH/REPLACE edit parsing and applying, chat dock, Manage Providers dialog |
 | `viper_ide/updater.py`, `updateui.py` | Remote self-update: feed check, sha256-verified download, silent installer hand-off |
 | `viper_ide/selftest.py` | `--selftest`, which also runs from the frozen build |
 | `packaging/` | PyInstaller spec, Inno Setup script, `build_windows.ps1` |

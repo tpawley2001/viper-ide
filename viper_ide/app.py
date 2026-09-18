@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout
                              QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
                              QPushButton, QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
-from . import APP_NAME, ORG_NAME, __version__, imports, interpreters, intel, packages, updater
+from . import APP_NAME, ORG_NAME, __version__, assistant, imports, interpreters, intel, packages, updater
 from .assistantui import AssistantPanel
 from .debugui import DebugPanel, DebugSession
 from .dialogs import CommandPalette, RenamePreviewDialog, SettingsDialog
@@ -276,6 +276,7 @@ class MainWindow(QMainWindow):
         a["assistant"] = A("AI Assistant", self.show_assistant, "Ctrl+Shift+A", "assistant",
                            "AI Assistant (Ctrl+Shift+A)")
         a["ask_ai"] = A("Ask AI to Edit...", ed(lambda e: self.show_assistant(with_file=True)), "Ctrl+I")
+        a["ai_providers"] = A("Manage AI Providers...", self.assistant.manage_providers)
 
         a["run"] = A("Run File", lambda: self.run_file(False), "F5", "run", "Run the current file (F5)")
         a["run_args"] = A("Run with Arguments...", lambda: self.run_file(False, ask_args=True), "Ctrl+Shift+F5")
@@ -340,8 +341,10 @@ class MainWindow(QMainWindow):
         for it in (None, a["zoom_in"], a["zoom_out"], a["zoom_reset"], None, a["wrap"], a["whitespace"], None,
                    a["theme_dark"], a["theme_light"]):
             view.addSeparator() if it is None else view.addAction(it)
+        self.ai_provider_menu = QMenu("AI Provider", self)
+        self.ai_provider_menu.aboutToShow.connect(self._fill_ai_provider_menu)
         menu("&Code", [a["complete"], a["docs"], a["goto_def"], a["references"], a["rename"], None, a["format"], None,
-                       a["assistant"], a["ask_ai"]])
+                       a["assistant"], a["ask_ai"], self.ai_provider_menu])
         menu("&Run", [a["run"], a["run_args"], a["debug"], a["stop"], None, a["continue"], a["pause"],
                       a["step_over"], a["step_into"], a["step_out"], None, a["breakpoint"], a["clear_bps"], None,
                       a["run_selection"], a["run_cell"], a["restart_console"]])
@@ -1575,12 +1578,13 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         old_theme = self.settings.get("theme")
-        old_ai = (self.settings.get("ai_base_url"), self.settings.get("ai_api_key"))
-        if SettingsDialog(self.settings, self).exec():
-            self.assistant.settings_changed()
-            if (self.settings.get("ai_base_url"), self.settings.get("ai_api_key")) != old_ai:
-                self.assistant.bar.clear("setup")
-                self.assistant.load_models()
+        old_ai = assistant.active_provider(self.settings)
+        dialog = SettingsDialog(self.settings, self)
+        accepted = dialog.exec()
+        self.assistant.providers_changed()  # Manage AI Providers saves even if Settings is cancelled
+        if assistant.active_provider(self.settings) != old_ai:
+            self.assistant.load_models()
+        if accepted:
             if self.settings.get("theme") != old_theme:
                 self.set_theme(self.settings.get("theme"))
             self._apply_editor_settings()
@@ -1595,10 +1599,16 @@ class MainWindow(QMainWindow):
         self._show_dock(self.assistant_dock)
         self.assistant.ask(with_file=with_file)
 
+    def _fill_ai_provider_menu(self) -> None:
+        from .providersui import fill_provider_menu
+
+        fill_provider_menu(self.ai_provider_menu, self.settings, self.assistant.switch_provider,
+                           self.assistant.manage_providers)
+
     def _assistant_visible(self, visible: bool) -> None:
         if visible:
             self.assistant.update_context()
-            if not self._assistant_models_loaded and self.settings.get("ai_base_url"):
+            if not self._assistant_models_loaded and assistant.active_provider(self.settings):
                 self._assistant_models_loaded = True
                 self.assistant.load_models()
 

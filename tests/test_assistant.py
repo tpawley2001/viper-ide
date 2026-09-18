@@ -88,7 +88,8 @@ class FakeOpenAI(BaseHTTPRequestHandler):
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        FakeOpenAI.requests.append({"auth": self.headers.get("Authorization"), "body": data})
+        FakeOpenAI.requests.append({"auth": self.headers.get("Authorization"), "body": data,
+                                    "port": self.server.server_address[1]})
         if not FakeOpenAI.stream:
             body = json.dumps({"choices": [{"message": {"role": "assistant", "content": FakeOpenAI.reply}}]}).encode()
             self.send_response(200)
@@ -108,15 +109,47 @@ class FakeOpenAI(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
+def _serve():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeOpenAI)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 @pytest.fixture
 def server():
     FakeOpenAI.requests = []
     FakeOpenAI.reply = REPLY
     FakeOpenAI.stream = True
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeOpenAI)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv = _serve()
     yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
     srv.shutdown()
+
+
+@pytest.fixture
+def server2():
+    srv = _serve()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    srv.shutdown()
+
+
+def test_legacy_settings_become_a_provider(tmp_path):
+    from viper_ide.settings import Settings
+
+    s = Settings(tmp_path / "s.json")
+    s._data.update(ai_base_url="http://old/v1", ai_api_key="sk-old", ai_model="m1")
+    p = assistant.active_provider(s)
+    assert p["name"] == "Default" and p["base_url"] == "http://old/v1" and p["api_key"] == "sk-old"
+    assert p["model"] == "m1" and "ai_base_url" not in s._data
+    assert json.loads((tmp_path / "s.json").read_text())["ai_provider"] == "Default"
+
+
+def test_keys_stay_with_their_provider(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert assistant.api_key(assistant.new_provider("o", "u", "OPENAI_API_KEY")) == "sk-openai"
+    assert assistant.api_key(assistant.new_provider("local", "http://localhost:11434/v1")) == ""
+    assert assistant.api_key(assistant.new_provider("g", "u", "GROQ_API_KEY")) == ""
+    assert assistant.api_key(dict(assistant.new_provider("g", "u", "OPENAI_API_KEY"), api_key="sk-own")) == "sk-own"
 
 
 def test_client_streams_and_lists_models(server):
@@ -152,8 +185,9 @@ def test_assistant_dock_edits_the_file(server, tmp_path, monkeypatch):
     from viper_ide.settings import Settings
 
     settings = Settings(tmp_path / "settings.json")
-    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable], ai_base_url=server,
-                          ai_model="fake-coder")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="fake-coder")],
+                          ai_provider="Fake")
     src = tmp_path / "calc.py"
     src.write_text(SOURCE)
     win = MainWindow(settings, [str(src)])
@@ -188,4 +222,66 @@ def test_assistant_dock_edits_the_file(server, tmp_path, monkeypatch):
     finally:
         for p in win.pages():
             p.editor.setModified(False)
+        win.close()
+
+
+def test_switch_provider_mid_conversation(server, server2, tmp_path, monkeypatch):
+    from test_gui import wait
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.providersui import ProvidersDialog
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable], ai_providers=[
+        dict(assistant.new_provider("One", server), model="model-one", api_key="sk-one"),
+        dict(assistant.new_provider("Two", server2), model="model-two", api_key="sk-two")], ai_provider="One")
+    win = MainWindow(settings, [str(tmp_path)])
+    win.show()
+    try:
+        panel = win.assistant
+        win.show_assistant()
+        assert [panel.provider.itemText(i) for i in range(panel.provider.count())] == ["One", "Two"]
+        assert panel.model.currentText() == "model-one"
+        panel.input.setPlainText("hello")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        first = FakeOpenAI.requests[-1]
+        assert first["port"] == int(server.rsplit(":", 1)[1].split("/")[0]) and first["auth"] == "Bearer sk-one"
+
+        panel.switch_provider("Two")
+        assert panel.model.currentText() == "model-two" and settings.get("ai_provider") == "Two"
+        panel.input.setPlainText("again")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        second = FakeOpenAI.requests[-1]
+        assert second["port"] == int(server2.rsplit(":", 1)[1].split("/")[0]) and second["auth"] == "Bearer sk-two"
+        assert second["body"]["model"] == "model-two"
+        assert [m["role"] for m in second["body"]["messages"]] == ["system", "user", "assistant", "user"]
+
+        # Model picks are remembered per provider.
+        panel.model.setCurrentText("model-two-b")
+        panel._model_changed()
+        panel.switch_provider("One")
+        assert panel.model.currentText() == "model-one"
+        assert assistant.providers(settings)[1]["model"] == "model-two-b"
+
+        # The Code menu lists providers with the active one checked.
+        win._fill_ai_provider_menu()
+        checked = [a.text() for a in win.ai_provider_menu.actions() if a.isChecked()]
+        assert checked == ["One  (model-one)"]
+
+        # Manage dialog: add a preset, make it active, save.
+        dlg = ProvidersDialog(settings, win)
+        dlg._add("Ollama (local)", "http://localhost:11434/v1", "")
+        dlg._make_active()
+        dlg.accept()
+        panel.providers_changed()
+        assert settings.get("ai_provider") == "Ollama (local)"
+        assert [p["name"] for p in assistant.providers(settings)] == ["One", "Two", "Ollama (local)"]
+        assert panel.provider.currentText() == "Ollama (local)"
+    finally:
         win.close()

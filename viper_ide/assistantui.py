@@ -61,13 +61,21 @@ class AssistantPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(4)
+        prow = QHBoxLayout()
+        self.provider = QComboBox()
+        self.provider.setToolTip("Which AI provider to use")
+        self.provider.activated.connect(lambda _i: self.switch_provider(self.provider.currentText()))
+        prow.addWidget(self.provider, 1)
+        manage = QToolButton(text="Manage...")
+        manage.setToolTip("Add, edit or remove AI providers")
+        manage.clicked.connect(self.manage_providers)
+        prow.addWidget(manage)
+        lay.addLayout(prow)
         top = QHBoxLayout()
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.setToolTip("Model name sent to the server")
         self.model.lineEdit().setPlaceholderText("model")
-        if settings.get("ai_model"):
-            self.model.addItem(settings.get("ai_model"))
         self.model.lineEdit().editingFinished.connect(self._model_changed)
         self.model.activated.connect(lambda _i: self._model_changed())
         top.addWidget(self.model, 1)
@@ -119,24 +127,65 @@ class AssistantPanel(QWidget):
 
         self._render_timer = QTimer(self, singleShot=True, interval=80)
         self._render_timer.timeout.connect(self._render)
-        self._render()
+        self.providers_changed()
 
     # ------------------------------------------------------------ settings
     def _model_changed(self) -> None:
+        p = assistant.active_provider(self.settings)
         name = self.model.currentText().strip()
-        if name != self.settings.get("ai_model"):
-            self.settings.set("ai_model", name)
+        if p and name != p["model"]:
+            assistant.set_model(self.settings, p["name"], name)
 
-    def settings_changed(self) -> None:
-        name = self.settings.get("ai_model")
-        if name and self.model.currentText() != name:
-            if self.model.findText(name) < 0:
-                self.model.addItem(name)
-            self.model.setCurrentText(name)
+    def providers_changed(self) -> None:
+        """Refill the provider and model boxes from settings (after Manage or a switch)."""
+        active = assistant.active_provider(self.settings)
+        self.provider.blockSignals(True)
+        self.provider.clear()
+        for p in assistant.providers(self.settings):
+            self.provider.addItem(p["name"])
+        if active:
+            self.provider.setCurrentText(active["name"])
+        else:
+            self.provider.addItem("No provider set up")
+        self.provider.setEnabled(bool(active))
+        self.provider.blockSignals(False)
+        model = active["model"] if active else ""
+        self.model.clear()
+        if model:
+            self.model.addItem(model)
+        self.model.setCurrentText(model)
+        self.status.setText("")
+        if active:
+            self.bar.clear("setup")
         self._render()
 
+    def switch_provider(self, name: str) -> None:
+        current = assistant.active_provider(self.settings)
+        if current and current["name"] == name:
+            return
+        assistant.set_active(self.settings, name)
+        self.providers_changed()
+        if self._transcript:
+            self._transcript.append(("note", f"Switched to {name}. The conversation continues with it."))
+            self._render()
+        self.load_models()
+
+    def manage_providers(self) -> None:
+        from .providersui import ProvidersDialog
+
+        active = assistant.active_provider(self.settings)
+        before = (active or {}).get("name")
+        if ProvidersDialog(self.settings, self).exec():
+            self.providers_changed()
+            after = (assistant.active_provider(self.settings) or {}).get("name")
+            if after and after != before and self._transcript:
+                self._transcript.append(("note", f"Switched to {after}. The conversation continues with it."))
+                self._render()
+            self.load_models()
+
     def load_models(self, silent: bool = True) -> None:
-        if not self.settings.get("ai_base_url"):
+        provider = assistant.active_provider(self.settings)
+        if not provider:
             if not silent:
                 self._no_server()
             return
@@ -160,13 +209,21 @@ class AssistantPanel(QWidget):
             if not silent:
                 QMessageBox.warning(self, "AI Assistant", msg)
 
-        run_async(assistant.list_models, self.settings.get("ai_base_url"), assistant.api_key(self.settings),
-                  on_done=done, on_error=failed)
+        name = provider["name"]
+
+        def guarded(fn):
+            def wrapper(value):  # drop the answer if the user switched provider meanwhile
+                if (assistant.active_provider(self.settings) or {}).get("name") == name:
+                    fn(value)
+            return wrapper
+
+        run_async(assistant.list_models, provider["base_url"], assistant.api_key(provider),
+                  on_done=guarded(done), on_error=guarded(failed))
 
     def _no_server(self) -> None:
-        self.bar.show_message("info", "Connect an OpenAI-compatible server (OpenAI, llama.cpp, Ollama, LM Studio...) "
-                              "to use the assistant.",
-                              [("Open Settings", self.host.open_settings, True)], tag="setup")
+        self.bar.show_message("info", "Add an AI provider (OpenAI, OpenRouter, Gemini, Ollama, LM Studio, or any "
+                              "OpenAI-compatible server) to use the assistant.",
+                              [("Add Provider...", self.manage_providers, True)], tag="setup")
 
     # ------------------------------------------------------------- chatting
     def ask(self, prompt: str = "", with_file: bool = False) -> None:
@@ -201,7 +258,8 @@ class AssistantPanel(QWidget):
         text = self.input.toPlainText().strip()
         if not text or self.busy():
             return
-        if not self.settings.get("ai_base_url"):
+        provider = assistant.active_provider(self.settings)
+        if not provider:
             self._no_server()
             return
         self.bar.clear()
@@ -228,7 +286,7 @@ class AssistantPanel(QWidget):
         self._cancel = cancel = threading.Event()
         self._set_busy(True, "Waiting for the model...")
         self._render()
-        run_async(assistant.stream_chat, self.settings.get("ai_base_url"), assistant.api_key(self.settings),
+        run_async(assistant.stream_chat, provider["base_url"], assistant.api_key(provider),
                   self.model.currentText().strip(), messages, cancel=cancel,
                   on_progress=lambda t: self._progress(cancel, t),
                   on_done=lambda reply: self._finished(cancel, reply, None),
@@ -343,14 +401,15 @@ class AssistantPanel(QWidget):
     # -------------------------------------------------------------- render
     def _render(self) -> None:
         if not self._transcript and not self._streaming:
-            if self.settings.get("ai_base_url"):
+            if assistant.active_provider(self.settings):
                 intro = ("Ask about the open file, or describe a change, e.g. *\"add type hints\"* or "
                          "*\"handle a missing file in load()\"*. Select code first to focus on it. Suggested "
                          "edits are shown as a diff before anything changes.")
             else:
-                intro = ("**No assistant server set.** Open **Settings > AI server URL** and enter any "
-                         "OpenAI-compatible endpoint: `https://api.openai.com/v1` (with an API key), or a local "
-                         "llama.cpp, Ollama (`http://localhost:11434/v1`) or LM Studio server.")
+                intro = ("**No AI provider set up.** Press **Manage...** above and add one: OpenAI, OpenRouter, "
+                         "Gemini, Groq, Mistral or DeepSeek (with an API key), a local Ollama, LM Studio or "
+                         "llama.cpp server, or any other OpenAI-compatible URL. Add several and switch between "
+                         "them from the drop-down.")
             self.view.setMarkdown(intro)
             return
         parts = []
@@ -359,6 +418,8 @@ class AssistantPanel(QWidget):
                 parts.append("**You**\n\n" + text)
             elif role == "assistant":
                 parts.append("**Assistant**\n\n" + display_markdown(text))
+            elif role == "note":
+                parts.append(f"_{text}_")
             else:
                 parts.append("**Error:** " + text)
         if self._streaming:

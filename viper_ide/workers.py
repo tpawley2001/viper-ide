@@ -43,9 +43,13 @@ def run_async(fn, *args, on_done=None, on_error=None, on_progress=None, **kwargs
             result = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-            call.failed.emit(detail)
+            signal, value = call.failed, detail
         else:
-            call.done.emit(result)
+            signal, value = call.done, result
+        try:
+            signal.emit(value)
+        except RuntimeError:  # Qt already tore the object down (the app is quitting); nobody is listening
+            _live.discard(call)
 
     threading.Thread(target=body, daemon=True).start()
     return call

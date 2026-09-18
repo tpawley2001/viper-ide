@@ -70,8 +70,68 @@ def normalise_base(url: str) -> str:
     return url
 
 
-def api_key(settings) -> str:
-    return (settings.get("ai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
+# name, base URL, environment variable the key falls back to. All speak the OpenAI chat API.
+PRESETS = [
+    ("OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+    ("OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+    ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+    ("Groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+    ("Mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
+    ("DeepSeek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+    ("Ollama (local)", "http://localhost:11434/v1", ""),
+    ("LM Studio (local)", "http://localhost:1234/v1", ""),
+    ("llama.cpp server (local)", "http://localhost:8080/v1", ""),
+]
+
+
+def new_provider(name: str = "", base_url: str = "", env_key: str = "") -> dict:
+    return {"name": name, "base_url": base_url, "api_key": "", "env_key": env_key, "model": ""}
+
+
+def providers(settings) -> list[dict]:
+    """The saved providers. A 1.2.x single-server setup becomes a provider named "Default"."""
+    items = [dict(new_provider(), **p) for p in settings.get("ai_providers") or [] if isinstance(p, dict)]
+    legacy = settings.get("ai_base_url")
+    if not items and legacy:
+        items = [dict(new_provider("Default", legacy), api_key=settings.get("ai_api_key") or "",
+                      env_key="OPENAI_API_KEY", model=settings.get("ai_model") or "")]
+        save_providers(settings, items, "Default")
+    return items
+
+
+def save_providers(settings, items: list[dict], active: str | None = None) -> None:
+    settings._data["ai_providers"] = [dict(p) for p in items]
+    if active is not None:
+        settings._data["ai_provider"] = active
+    for key in ("ai_base_url", "ai_api_key", "ai_model"):
+        settings._data.pop(key, None)
+    settings.save()
+
+
+def active_provider(settings) -> dict | None:
+    items = providers(settings)
+    name = settings.get("ai_provider")
+    return next((p for p in items if p["name"] == name), items[0] if items else None)
+
+
+def set_active(settings, name: str) -> None:
+    settings.set("ai_provider", name)
+
+
+def set_model(settings, name: str, model: str) -> None:
+    items = providers(settings)
+    for p in items:
+        if p["name"] == name:
+            p["model"] = model
+    save_providers(settings, items)
+
+
+def api_key(provider: dict | None) -> str:
+    """The provider's own key, else its environment variable (never another provider's key)."""
+    if not provider:
+        return ""
+    env = provider.get("env_key") or ""
+    return (provider.get("api_key") or (os.environ.get(env) if env else "") or "").strip()
 
 
 def _request(base: str, path: str, key: str, body: dict | None = None) -> urllib.request.Request:
@@ -98,7 +158,7 @@ def _http_error(e: urllib.error.HTTPError) -> AssistantError:
 def list_models(base: str, key: str, timeout: float = 10.0) -> list[str]:
     base = normalise_base(base)
     if not base:
-        raise AssistantError("No assistant server URL is set (Settings > AI Assistant).")
+        raise AssistantError("This AI provider has no server URL. Set one in Manage Providers.")
     try:
         with urllib.request.urlopen(_request(base, "/models", key), timeout=timeout) as r:
             data = json.load(r)
@@ -120,7 +180,7 @@ def stream_chat(base: str, key: str, model: str, messages: list[dict], temperatu
     """
     base = normalise_base(base)
     if not base:
-        raise AssistantError("No assistant server URL is set (Settings > AI Assistant).")
+        raise AssistantError("This AI provider has no server URL. Set one in Manage Providers.")
     body: dict = {"messages": messages, "stream": True}
     if model:
         body["model"] = model
