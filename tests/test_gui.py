@@ -16,11 +16,6 @@ from PyQt6.QtGui import QKeyEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 
-@pytest.fixture(scope="session")
-def app():
-    return QApplication.instance() or QApplication([])
-
-
 def wait(app, pred, secs=20):
     deadline = time.monotonic() + secs
     while time.monotonic() < deadline:

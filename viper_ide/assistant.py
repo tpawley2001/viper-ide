@@ -256,9 +256,25 @@ def error_excerpt(output: str) -> str | None:
     return text
 
 
+MAX_RED_CHARS = 4000
+_PROMPT_ONLY = re.compile(r"^\s*(?:>>>|\.\.\.)\s*$")
+
+
+def clean_red(text: str, limit: int = MAX_RED_CHARS) -> str:
+    """Red (stderr) text for the model: no bare console prompts, trimmed to its most recent part."""
+    lines = [ln for ln in (text or "").splitlines() if not _PROMPT_ONLY.match(ln)]
+    out = "\n".join(lines).strip("\n").rstrip()
+    if len(out) > limit:
+        out = "...\n" + out[-limit:]
+    return out
+
+
 def context_message(path: str, text: str, selection: tuple[int, int, str] | None,
-                    problems: list[dict] | None = None, run_error: tuple[str, str] | None = None) -> str:
-    """The current file (plus selection, lint problems and the last run's error) as a user message."""
+                    problems: list[dict] | None = None, red: list[tuple[str, str]] | None = None) -> str:
+    """The current file plus what the IDE shows about it: selection, lint problems, and red output.
+
+    ``red`` is [(where, text)]: everything the IDE is showing in red, e.g. a run's stderr.
+    """
     name = path or "untitled.py"
     body = text
     note = ""
@@ -274,9 +290,11 @@ def context_message(path: str, text: str, selection: tuple[int, int, str] | None
                  for p in sorted(problems, key=lambda p: p.get("line", 0))[:50]]
         parts.append("Problems the IDE's checker (pyflakes) reports in this file:\n<problems>\n"
                      + "\n".join(lines) + "\n</problems>")
-    if run_error:
-        ran, err = run_error
-        parts.append(f"The last time the user ran {ran} it failed with:\n<run_error>\n{err}\n</run_error>")
+    shown = [(where, clean_red(t)) for where, t in red or []]
+    shown = [(where, t) for where, t in shown if t]
+    if shown:
+        parts.append("Errors and warnings the IDE is currently showing in red:\n" + "\n".join(
+            f'<red_output source="{where}">\n{t}\n</red_output>' for where, t in shown))
     return "\n\n".join(parts)
 
 

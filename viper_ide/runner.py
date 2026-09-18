@@ -22,6 +22,7 @@ from .theme import mono_font
 IS_WIN = os.name == "nt"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 LOCATION = re.compile(r'File "([^"]+)", line (\d+)|^([A-Za-z]:[\\/][^:]+|/[^:]+):(\d+):')
+RED_LIMIT = 16384
 
 
 def activated_env(interp) -> dict:
@@ -49,17 +50,21 @@ class OutputView(QPlainTextEdit):
         self.setMaximumBlockCount(20000)
         self.setFont(mono_font("", font_size))
         self.setMouseTracking(True)
+        self.red = ""  # recent text shown in red (stderr), which the AI assistant can see
         self.set_theme(theme)
 
     def set_theme(self, theme) -> None:
-        self.colors = {"out": theme["fg"], "err": theme["error"], "info": theme["fg_dim"], "ok": theme["ok"],
-                       "input": theme["info"]}
+        # "status_err" is red like "err" but is the IDE's own note (e.g. an exit code), not program output.
+        self.colors = {"out": theme["fg"], "err": theme["error"], "status_err": theme["error"], "info": theme["fg_dim"],
+                       "ok": theme["ok"], "input": theme["info"]}
 
     def append_text(self, text: str, kind: str = "out") -> None:
         text = ANSI.sub("", text).replace("\r\n", "\n")
         text = re.sub(r"[^\n]*\r(?!\n)", "", text)  # progress bars redraw with a bare CR
         if not text:
             return
+        if kind == "err":
+            self.red = (self.red + text)[-RED_LIMIT:]
         bar = self.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         cursor = QTextCursor(self.document())
@@ -69,6 +74,10 @@ class OutputView(QPlainTextEdit):
         cursor.insertText(text, fmt)
         if at_bottom:
             bar.setValue(bar.maximum())
+
+    def clear(self) -> None:
+        super().clear()
+        self.red = ""
 
     def _location_at(self, pos):
         line = self.cursorForPosition(pos).block().text()
@@ -182,6 +191,7 @@ class RunPanel(_ProcessPanel):
         if self.settings.get("clear_output_on_run"):
             self.view.clear()
         self._tail = ""
+        self.view.red = ""  # red text belongs to one run, even when the output isn't cleared
         self._last = (program, list(args), cwd, env, title)
         self.title.setText(title)
         self.view.append_text(f"{program} {' '.join(args)}\n", "info")
@@ -213,7 +223,7 @@ class RunPanel(_ProcessPanel):
         elapsed = time.monotonic() - self._t0
         crashed = status == QProcess.ExitStatus.CrashExit and code != -1
         msg = "terminated" if crashed else f"exited with code {code}"
-        self.view.append_text(f"\nProcess {msg} ({elapsed:.1f}s)\n", "ok" if code == 0 and not crashed else "err")
+        self.view.append_text(f"\nProcess {msg} ({elapsed:.1f}s)\n", "ok" if code == 0 and not crashed else "status_err")
         self.stop_btn.setEnabled(False)
         self.stdin.setEnabled(False)
         self.title.setText(f"{self._last[4] if self._last else ''} - finished")

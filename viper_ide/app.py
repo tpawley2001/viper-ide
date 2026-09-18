@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import sys
 import traceback
 
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self._runtime_attempted: set = set()
         self._last_run = None
         self.last_run_error: tuple[str, str] | None = None  # (script, traceback) of the last failed run
+        self._last_exit: int | None = None
         self._project_files: list[str] | None = None
         self._zoom = 0
         self._shortcut_keys: set[int] = set()
@@ -1396,6 +1398,7 @@ class MainWindow(QMainWindow):
         cwd = self.project if self.settings.get("run_cwd") == "project" and self.project else os.path.dirname(path)
         env = activated_env(self.interp)
         self._last_run = (path, debug, args)
+        self._last_exit = None
         self._show_dock(self.run_dock)
         self._clear_debug_lines()
         if debug:
@@ -1433,8 +1436,34 @@ class MainWindow(QMainWindow):
             return  # installed it once already and the import still fails: don't loop
         run_async(imports.resolve_missing, [module], on_done=lambda pkgs: self._offer_runtime_install(pkgs, key))
 
+    def red_outputs(self) -> list[tuple[str, str]]:
+        """Everything the IDE is showing in red, as (where, text), for the AI assistant."""
+        out = []
+        red = self.run_panel.view.red
+        if red.strip() and self._last_run:
+            name = os.path.basename(self._last_run[0])
+            if self.run_panel.running() or self.debug.active:
+                state = "is still running"
+            elif self._last_exit:
+                state = f"exited with code {self._last_exit}"
+            else:
+                state = "finished successfully"
+            out.append((f"Run panel: stderr of the last run of {name}, which {state}", red))
+        for where, view in (("Python console", self.console.view), ("Terminal", self.terminal.view),
+                            ("Debugger console", self.debug_panel.console)):
+            if view.red.strip():
+                out.append((where, view.red))
+        page = self.page()
+        for where, bar in (("Notice above the editor", page.info if page else None),
+                           ("Notice above the editor", self.global_bar)):
+            if bar is not None and bar.isVisible() and bar.property("level") == "error":
+                text = html.unescape(re.sub(r"<br\s*/?>", "\n", bar.label.text()))
+                out.append((where, re.sub(r"<[^>]+>", "", text)))
+        return out
+
     def _note_run_error(self, code: int, tail: str) -> None:
         """Remember a failed run's traceback for the assistant and offer to have it fixed."""
+        self._last_exit = code
         err = assistant.error_excerpt(tail) if code != 0 and self._last_run else None
         path = self._last_run[0] if self._last_run else None
         self.last_run_error = (path, err) if err else None

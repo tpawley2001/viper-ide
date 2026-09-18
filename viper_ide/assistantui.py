@@ -93,6 +93,10 @@ class AssistantPanel(QWidget):
         lay.addWidget(self.bar)
         self.view = QTextBrowser()
         self.view.setOpenExternalLinks(True)
+        # Follow the newest text unless the user scrolls up to read; scrolling back down resumes following.
+        self._follow = True
+        self.view.verticalScrollBar().valueChanged.connect(self._scrolled)
+        self.view.verticalScrollBar().rangeChanged.connect(lambda _lo, _hi: self._follow and self.scroll_to_end())
         lay.addWidget(self.view, 1)
 
         self.include = QCheckBox("Send the current file")
@@ -102,8 +106,9 @@ class AssistantPanel(QWidget):
         self.context_label = QLabel()
         self.context_label.setObjectName("Dim")
         self.include_errors = QCheckBox("Include errors")
-        self.include_errors.setToolTip("Also send the file's problems (pyflakes) and the traceback from the last "
-                                       "run, if it failed")
+        self.include_errors.setToolTip("Also send the file's problems (pyflakes) and everything shown in red: the "
+                                       "last run's error output, the console, terminal and debugger, and error "
+                                       "notices")
         self.include_errors.setChecked(bool(settings.get("ai_include_errors")))
         self.include_errors.toggled.connect(self._errors_toggled)
         self.include.toggled.connect(lambda on: self.include_errors.setEnabled(on))
@@ -241,16 +246,21 @@ class AssistantPanel(QWidget):
             return
         self.include.setChecked(True)
         self.include_errors.setChecked(True)
-        problems, run_error = self._errors_for(e)
-        if run_error and problems:
+        problems, red = self._errors_for(e)
+        crashed = self.host.last_run_error is not None
+        if crashed and problems:
             prompt = "My program failed with the error shown, and the checker reports problems. Fix them."
-        elif run_error:
+        elif crashed:
             prompt = "My program failed with the error shown. Find the cause and fix it."
+        elif problems and red:
+            prompt = "Fix the problems the checker reports and the errors or warnings shown in red."
         elif problems:
             prompt = "Fix the problems the checker reports in this file."
+        elif red:
+            prompt = "Fix what's causing the errors or warnings shown in red."
         else:
             self.ask("", with_file=True)
-            self.status.setText("No errors to send: the file has no problems and the last run didn't fail.")
+            self.status.setText("No errors to send: no problems in the file and nothing shown in red.")
             return
         if self.busy():
             self.ask(prompt, with_file=True)
@@ -270,16 +280,17 @@ class AssistantPanel(QWidget):
         cursor.movePosition(cursor.MoveOperation.End)
         self.input.setTextCursor(cursor)
         self.update_context()
+        self.scroll_to_end()
 
     def _errors_toggled(self, on: bool) -> None:
         self.settings.set("ai_include_errors", bool(on))
         self.update_context()
 
-    def _errors_for(self, editor) -> tuple[list[dict], tuple[str, str] | None]:
-        """Lint problems for this editor and the last failed run's traceback, if errors are included."""
+    def _errors_for(self, editor) -> tuple[list[dict], list[tuple[str, str]]]:
+        """Lint problems for this editor and all red output in the IDE, if errors are included."""
         if not self.include_errors.isChecked():
-            return [], None
-        return list(editor.lint_items), self.host.last_run_error
+            return [], []
+        return list(editor.lint_items), [(w, t) for w, t in self.host.red_outputs() if assistant.clean_red(t)]
 
     def update_context(self) -> None:
         e = self.host.editor()
@@ -292,11 +303,16 @@ class AssistantPanel(QWidget):
             if it == 0 and lt > lf:
                 lt -= 1
             text += f", lines {lf + 1}-{lt + 1}"
-        problems, run_error = self._errors_for(e)
+        problems, red = self._errors_for(e)
         if problems:
             text += f", {len(problems)} problem{'s' if len(problems) != 1 else ''}"
-        if run_error:
-            text += ", last run's error"
+        if red:
+            sources = []
+            for where, _t in red:
+                short = "notice" if where.startswith("Notice") else where.split(":")[0].replace(" panel", "").lower()
+                if short not in sources:
+                    sources.append(short)
+            text += ", red text from " + ", ".join(sources)
         self.context_label.setText(text)
 
     def busy(self) -> bool:
@@ -321,9 +337,9 @@ class AssistantPanel(QWidget):
                 if it == 0 and lt > lf:
                     lt -= 1
                 selection = (lf + 1, lt + 1, e.selectedText())
-            problems, run_error = self._errors_for(e)
+            problems, red = self._errors_for(e)
             content = assistant.context_message(e.path or e.display_name(), e.text(), selection, problems,
-                                                run_error) + "\n\n" + text
+                                                red) + "\n\n" + text
             self._target = (e, e.path or e.display_name())
         else:
             self._target = None
@@ -331,6 +347,7 @@ class AssistantPanel(QWidget):
                     {"role": "user", "content": content}]
         self.history.append({"role": "user", "content": text})
         self._transcript.append(("user", text))
+        self._follow = True
         self.input.clear()
         self._streaming = ""
         self._cancel = cancel = threading.Event()
@@ -449,6 +466,22 @@ class AssistantPanel(QWidget):
         self.send()
 
     # -------------------------------------------------------------- render
+    _rendering = False
+
+    def _scrolled(self, value: int) -> None:
+        if not self._rendering:
+            bar = self.view.verticalScrollBar()
+            self._follow = value >= bar.maximum() - 4
+
+    def scroll_to_end(self) -> None:
+        if sip.isdeleted(self):
+            return
+        bar = self.view.verticalScrollBar()
+        self._rendering = True
+        bar.setValue(bar.maximum())
+        self._rendering = False
+        self._follow = True
+
     def _render(self) -> None:
         if not self._transcript and not self._streaming:
             if assistant.active_provider(self.settings):
@@ -474,8 +507,11 @@ class AssistantPanel(QWidget):
                 parts.append("**Error:** " + text)
         if self._streaming:
             parts.append("**Assistant**\n\n" + display_markdown(self._streaming))
-        bar = self.view.verticalScrollBar()
-        at_end = bar.value() >= bar.maximum() - 4
-        self.view.setMarkdown("\n\n---\n\n".join(parts))
-        if at_end or self._streaming:
-            bar.setValue(bar.maximum())
+        follow = self._follow
+        self._rendering = True
+        self.view.setMarkdown("\n\n---\n\n".join(parts))  # resets the scroll position to the top
+        self._rendering = False
+        self._follow = follow
+        if follow:
+            self.scroll_to_end()
+            QTimer.singleShot(0, self.scroll_to_end)  # again once the new text has been laid out

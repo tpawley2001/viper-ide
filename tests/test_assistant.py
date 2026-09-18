@@ -174,11 +174,8 @@ def test_client_reports_unreachable_server():
         assistant.list_models("http://127.0.0.1:9/v1", "", timeout=2)
 
 
-def test_assistant_dock_edits_the_file(server, tmp_path, monkeypatch):
+def test_assistant_dock_edits_the_file(app, server, tmp_path, monkeypatch):
     from test_gui import wait
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
     monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
     from viper_ide import assistantui
     from viper_ide.app import MainWindow
@@ -225,11 +222,8 @@ def test_assistant_dock_edits_the_file(server, tmp_path, monkeypatch):
         win.close()
 
 
-def test_switch_provider_mid_conversation(server, server2, tmp_path, monkeypatch):
+def test_switch_provider_mid_conversation(app, server, server2, tmp_path, monkeypatch):
     from test_gui import wait
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
     monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
     from viper_ide.app import MainWindow
     from viper_ide.providersui import ProvidersDialog
@@ -276,13 +270,13 @@ def test_switch_provider_mid_conversation(server, server2, tmp_path, monkeypatch
 
         # Manage dialog: add a preset, make it active, save.
         dlg = ProvidersDialog(settings, win)
-        dlg._add("Ollama (local)", "http://localhost:11434/v1", "")
+        dlg._add("Custom", server2, "")
         dlg._make_active()
         dlg.accept()
         panel.providers_changed()
-        assert settings.get("ai_provider") == "Ollama (local)"
-        assert [p["name"] for p in assistant.providers(settings)] == ["One", "Two", "Ollama (local)"]
-        assert panel.provider.currentText() == "Ollama (local)"
+        assert settings.get("ai_provider") == "Custom"
+        assert [p["name"] for p in assistant.providers(settings)] == ["One", "Two", "Custom"]
+        assert panel.provider.currentText() == "Custom"
     finally:
         win.close()
 
@@ -298,19 +292,18 @@ def test_error_excerpt_and_context():
     assert len(assistant.error_excerpt(_TB_LONG)) <= assistant.MAX_ERROR_CHARS + 4
     msg = assistant.context_message("a.py", "x = y\n", None,
                                     [{"line": 1, "severity": "error", "message": "undefined name 'y'"}],
-                                    ("a.py", err))
+                                    [("Run panel", err + "\n"), ("Python console", ">>> \n>>>\n...\n"), ("Terminal", "")])
     assert "<problems>\nline 1: error: undefined name 'y'\n</problems>" in msg
-    assert "<run_error>\n" + err in msg and "The last time the user ran a.py" in msg
+    assert '<red_output source="Run panel">\n' + err + "\n</red_output>" in msg
+    assert "Python console" not in msg and "Terminal" not in msg  # prompts only / empty: nothing to show
+    assert assistant.clean_red("x" * 9000).startswith("...\n") and len(assistant.clean_red("x" * 9000)) < 4100
 
 
 _TB_LONG = "Traceback (most recent call last):\n" + "  File \"a.py\", line 1, in f\n" * 1000 + "RecursionError: x\n"
 
 
-def test_fix_errors_sends_traceback_and_problems(server, tmp_path, monkeypatch):
+def test_fix_errors_sends_traceback_and_problems(app, server, tmp_path, monkeypatch):
     from test_gui import wait
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
     monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
     from viper_ide.app import MainWindow
     from viper_ide.settings import Settings
@@ -336,7 +329,8 @@ def test_fix_errors_sends_traceback_and_problems(server, tmp_path, monkeypatch):
         panel = win.assistant
         assert wait(app, lambda: FakeOpenAI.requests and not panel.busy(), 20)
         sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
-        assert "<run_error>" in sent and "ZeroDivisionError: division by zero" in sent
+        assert '<red_output source="Run panel: stderr of the last run of crash.py, which exited with code 1">' in sent
+        assert "ZeroDivisionError: division by zero" in sent
         assert "<problems>" in sent and "imported but unused" in sent
         assert "failed with the error shown" in sent
         assert not page.info.isVisible() and panel.bar.tag == "edits"
@@ -347,8 +341,102 @@ def test_fix_errors_sends_traceback_and_problems(server, tmp_path, monkeypatch):
         panel.send()
         assert wait(app, lambda: not panel.busy(), 20)
         sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
-        assert "<run_error>" not in sent and "<problems>" not in sent and "<file>" in sent
+        assert "<red_output" not in sent and "<problems>" not in sent and "<file>" in sent
     finally:
         for p in win.pages():
             p.editor.setModified(False)
+        win.close()
+
+
+def test_red_output_from_everywhere_reaches_the_assistant(app, server, tmp_path, monkeypatch):
+    from test_gui import wait
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="m")], ai_provider="Fake")
+    src = tmp_path / "warn.py"
+    src.write_text("import warnings\n\nwarnings.warn('old_api() is deprecated', DeprecationWarning, stacklevel=1)\n"
+                   "print('done')\n")
+    win = MainWindow(settings, [str(src)])
+    win.show()
+    try:
+        assert wait(app, lambda: win.interp is not None, 30)
+        page = win.page()
+        win.run_file(False)
+        assert wait(app, lambda: "exited with code 0" in win.run_panel.view.toPlainText(), 30)
+        assert "old_api() is deprecated" in win.run_panel.view.red
+        assert "exited" not in win.run_panel.view.red  # Viper's own status line isn't program output
+        assert not page.info.isVisible()  # a warning isn't a crash: no Fix with AI bar
+        assert win.last_run_error is None
+
+        win.console.run_code("int('x')")
+        assert wait(app, lambda: "invalid literal" in win.console.view.red, 30)
+        page.info.show_message("error", "Couldn't install <b>foo</b>: no matching distribution", tag="t")
+
+        panel = win.assistant
+        win.show_assistant()
+        panel.update_context()
+        assert "red text from run, python console, notice" in panel.context_label.text()
+        panel.fix_errors()
+        assert wait(app, lambda: FakeOpenAI.requests and not panel.busy(), 20)
+        sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
+        assert "which finished successfully" in sent and "old_api() is deprecated" in sent
+        assert '<red_output source="Python console">' in sent and "invalid literal for int()" in sent
+        assert '<red_output source="Notice above the editor">' in sent and "Couldn't install foo: no matching" in sent
+        assert "shown in red" in sent
+
+        # Clearing a panel clears what the assistant sees from it; a new run starts fresh.
+        win.console.view.clear()
+        page.info.clear()
+        src.write_text("print('clean')\n")
+        page.editor.setText("print('clean')\n")
+        win.run_file(False)
+        assert wait(app, lambda: "exited with code 0" in win.run_panel.view.toPlainText()
+                    and not win.run_panel.running(), 30)
+        assert win.red_outputs() == []
+    finally:
+        for p in win.pages():
+            p.editor.setModified(False)
+        win.close()
+
+
+def test_chat_stays_scrolled_to_the_bottom(app, server, tmp_path, monkeypatch):
+    from test_gui import wait
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="m")], ai_provider="Fake")
+    FakeOpenAI.reply = "\n\n".join(f"Paragraph {i} of a long answer." for i in range(120))
+    win = MainWindow(settings, [str(tmp_path)])
+    win.resize(1200, 700)
+    win.show()
+    try:
+        panel = win.assistant
+        win.show_assistant()
+        bar = panel.view.verticalScrollBar()
+        at_bottom = lambda: bar.maximum() > 0 and bar.value() == bar.maximum()  # noqa: E731
+
+        panel.input.setPlainText("tell me a lot")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        assert wait(app, at_bottom, 5), (bar.value(), bar.maximum())
+
+        # Scrolled up to read: a new reply streaming in doesn't yank the view...
+        bar.setValue(0)
+        app.processEvents()
+        panel._transcript.append(("note", "x"))
+        panel._render()
+        assert wait(app, lambda: True, 0.3) and bar.value() == 0
+        # ...but sending a new message jumps back to the newest text.
+        panel.input.setPlainText("more")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        assert wait(app, at_bottom, 5), (bar.value(), bar.maximum())
+    finally:
         win.close()
