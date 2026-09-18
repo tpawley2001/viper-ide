@@ -101,8 +101,16 @@ class AssistantPanel(QWidget):
         self.include.toggled.connect(lambda on: self.settings.set("ai_include_file", bool(on)))
         self.context_label = QLabel()
         self.context_label.setObjectName("Dim")
+        self.include_errors = QCheckBox("Include errors")
+        self.include_errors.setToolTip("Also send the file's problems (pyflakes) and the traceback from the last "
+                                       "run, if it failed")
+        self.include_errors.setChecked(bool(settings.get("ai_include_errors")))
+        self.include_errors.toggled.connect(self._errors_toggled)
+        self.include.toggled.connect(lambda on: self.include_errors.setEnabled(on))
+        self.include_errors.setEnabled(self.include.isChecked())
         row = QHBoxLayout()
         row.addWidget(self.include)
+        row.addWidget(self.include_errors)
         row.addWidget(self.context_label, 1)
         lay.addLayout(row)
 
@@ -226,6 +234,31 @@ class AssistantPanel(QWidget):
                               [("Add Provider...", self.manage_providers, True)], tag="setup")
 
     # ------------------------------------------------------------- chatting
+    def fix_errors(self) -> None:
+        """Ask the model to fix the current file's problems and/or the last run's error."""
+        e = self.host.editor()
+        if e is None:
+            return
+        self.include.setChecked(True)
+        self.include_errors.setChecked(True)
+        problems, run_error = self._errors_for(e)
+        if run_error and problems:
+            prompt = "My program failed with the error shown, and the checker reports problems. Fix them."
+        elif run_error:
+            prompt = "My program failed with the error shown. Find the cause and fix it."
+        elif problems:
+            prompt = "Fix the problems the checker reports in this file."
+        else:
+            self.ask("", with_file=True)
+            self.status.setText("No errors to send: the file has no problems and the last run didn't fail.")
+            return
+        if self.busy():
+            self.ask(prompt, with_file=True)
+            return
+        self.input.setPlainText(prompt)
+        self.update_context()
+        self.send()
+
     def ask(self, prompt: str = "", with_file: bool = False) -> None:
         """Focus the prompt box; ``with_file`` (Ask AI to Edit) makes sure the file goes along."""
         if with_file:
@@ -238,6 +271,16 @@ class AssistantPanel(QWidget):
         self.input.setTextCursor(cursor)
         self.update_context()
 
+    def _errors_toggled(self, on: bool) -> None:
+        self.settings.set("ai_include_errors", bool(on))
+        self.update_context()
+
+    def _errors_for(self, editor) -> tuple[list[dict], tuple[str, str] | None]:
+        """Lint problems for this editor and the last failed run's traceback, if errors are included."""
+        if not self.include_errors.isChecked():
+            return [], None
+        return list(editor.lint_items), self.host.last_run_error
+
     def update_context(self) -> None:
         e = self.host.editor()
         if not e:
@@ -249,6 +292,11 @@ class AssistantPanel(QWidget):
             if it == 0 and lt > lf:
                 lt -= 1
             text += f", lines {lf + 1}-{lt + 1}"
+        problems, run_error = self._errors_for(e)
+        if problems:
+            text += f", {len(problems)} problem{'s' if len(problems) != 1 else ''}"
+        if run_error:
+            text += ", last run's error"
         self.context_label.setText(text)
 
     def busy(self) -> bool:
@@ -273,7 +321,9 @@ class AssistantPanel(QWidget):
                 if it == 0 and lt > lf:
                     lt -= 1
                 selection = (lf + 1, lt + 1, e.selectedText())
-            content = assistant.context_message(e.path or e.display_name(), e.text(), selection) + "\n\n" + text
+            problems, run_error = self._errors_for(e)
+            content = assistant.context_message(e.path or e.display_name(), e.text(), selection, problems,
+                                                run_error) + "\n\n" + text
             self._target = (e, e.path or e.display_name())
         else:
             self._target = None

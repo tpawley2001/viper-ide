@@ -45,6 +45,12 @@ llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without l
    it as **one undo step** (`Ctrl+Z` reverts all of it). Nothing changes until you apply. Blocks that don't
    match are listed, and **Ask to Fix** sends them back to the model.
 
+**Errors:** with **Include errors** ticked (the default), each message also carries the file's problems
+from the checker (pyflakes, as in the Problems panel) and, if the last run failed, its traceback. When a run
+crashes, a **Fix with AI** bar appears above the file. **Fix Errors with AI** (`Ctrl+Shift+I`, in the Code
+menu and the editor's right-click menu) sends the errors with a request to fix them. The line under the
+prompt box shows what will be sent, e.g. *crash.py, 1 problem, last run's error*.
+
 **Switching providers:** add as many as you like and switch from the drop-down at the top of the panel or
 **Code → AI Provider**. Each provider remembers its own model, and its key is sent only to its own server.
 Switching mid-conversation carries on the same chat with the new model. Settings from 1.2.x become a
@@ -96,6 +102,7 @@ indentation shifts, and CRLF files stay CRLF. Keys are stored in `settings.json`
 | Show docs | `Ctrl+Q` | Completion | `Ctrl+Space` |
 | Run selection in console | `Shift+Enter` | Run `# %%` cell | `Ctrl+Enter` |
 | AI Assistant | `Ctrl+Shift+A` | Ask AI to edit | `Ctrl+I` |
+| Fix errors with AI | `Ctrl+Shift+I` | | |
 
 ## Install
 

@@ -233,8 +233,32 @@ def _message_text(data: dict) -> str:
         raise AssistantError(f"Unexpected reply from the server: {json.dumps(data)[:300]}") from None
 
 
-def context_message(path: str, text: str, selection: tuple[int, int, str] | None) -> str:
-    """The current file (and selection) as a user message the model can edit against."""
+MAX_ERROR_CHARS = 6000
+_TRACEBACK = "Traceback (most recent call last):"
+_ERROR_LINE = re.compile(r"^(?:[A-Za-z_][\w.]*)?(?:Error|Exception|Exit|Interrupt)\b.*$|^\s*File \".*\", line \d+",
+                         re.MULTILINE)
+
+
+def error_excerpt(output: str) -> str | None:
+    """The traceback (or error report) at the end of a program's output, or None if it didn't error."""
+    if not output:
+        return None
+    i = output.rfind(_TRACEBACK)
+    if i >= 0:
+        text = output[i:]
+    elif _ERROR_LINE.search("\n".join(output.splitlines()[-40:])):
+        text = "\n".join(output.splitlines()[-40:])  # e.g. a SyntaxError, which has no "Traceback" header
+    else:
+        return None
+    text = text.strip("\r\n").rstrip()
+    if len(text) > MAX_ERROR_CHARS:  # keep the end: that's where the exception is
+        text = "...\n" + text[-MAX_ERROR_CHARS:]
+    return text
+
+
+def context_message(path: str, text: str, selection: tuple[int, int, str] | None,
+                    problems: list[dict] | None = None, run_error: tuple[str, str] | None = None) -> str:
+    """The current file (plus selection, lint problems and the last run's error) as a user message."""
     name = path or "untitled.py"
     body = text
     note = ""
@@ -245,6 +269,14 @@ def context_message(path: str, text: str, selection: tuple[int, int, str] | None
     if selection:
         first, last, sel = selection
         parts.append(f"The user has selected lines {first}-{last}:\n<selection>\n{sel}\n</selection>")
+    if problems:
+        lines = [f"line {p.get('line', '?')}: {p.get('severity', 'error')}: {p.get('message', '')}"
+                 for p in sorted(problems, key=lambda p: p.get("line", 0))[:50]]
+        parts.append("Problems the IDE's checker (pyflakes) reports in this file:\n<problems>\n"
+                     + "\n".join(lines) + "\n</problems>")
+    if run_error:
+        ran, err = run_error
+        parts.append(f"The last time the user ran {ran} it failed with:\n<run_error>\n{err}\n</run_error>")
     return "\n\n".join(parts)
 
 

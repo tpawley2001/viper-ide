@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self._imports: dict[int, dict] = {}
         self._runtime_attempted: set = set()
         self._last_run = None
+        self.last_run_error: tuple[str, str] | None = None  # (script, traceback) of the last failed run
         self._project_files: list[str] | None = None
         self._zoom = 0
         self._shortcut_keys: set[int] = set()
@@ -277,6 +278,7 @@ class MainWindow(QMainWindow):
                            "AI Assistant (Ctrl+Shift+A)")
         a["ask_ai"] = A("Ask AI to Edit...", ed(lambda e: self.show_assistant(with_file=True)), "Ctrl+I")
         a["ai_providers"] = A("Manage AI Providers...", self.assistant.manage_providers)
+        a["fix_ai"] = A("Fix Errors with AI", ed(lambda e: self.fix_with_ai()), "Ctrl+Shift+I")
 
         a["run"] = A("Run File", lambda: self.run_file(False), "F5", "run", "Run the current file (F5)")
         a["run_args"] = A("Run with Arguments...", lambda: self.run_file(False, ask_args=True), "Ctrl+Shift+F5")
@@ -344,7 +346,7 @@ class MainWindow(QMainWindow):
         self.ai_provider_menu = QMenu("AI Provider", self)
         self.ai_provider_menu.aboutToShow.connect(self._fill_ai_provider_menu)
         menu("&Code", [a["complete"], a["docs"], a["goto_def"], a["references"], a["rename"], None, a["format"], None,
-                       a["assistant"], a["ask_ai"], self.ai_provider_menu])
+                       a["assistant"], a["ask_ai"], a["fix_ai"], self.ai_provider_menu])
         menu("&Run", [a["run"], a["run_args"], a["debug"], a["stop"], None, a["continue"], a["pause"],
                       a["step_over"], a["step_into"], a["step_out"], None, a["breakpoint"], a["clear_bps"], None,
                       a["run_selection"], a["run_cell"], a["restart_console"]])
@@ -468,7 +470,7 @@ class MainWindow(QMainWindow):
 
     def editor_context_actions(self) -> list:
         a = self.a
-        return [a["ask_ai"], None, a["goto_def"], a["references"], a["rename"], a["docs"], None, a["run_selection"],
+        return [a["ask_ai"], a["fix_ai"], None, a["goto_def"], a["references"], a["rename"], a["docs"], None, a["run_selection"],
                 a["comment"], a["format"]]
 
     def _indent_selection(self, e, indent: bool) -> None:
@@ -1200,6 +1202,8 @@ class MainWindow(QMainWindow):
                 items = items + [{"line": line, "col": 0, "message": msg, "severity": "warning", "whole_line": True}]
         editor.set_lint(items)
         self.problems.set_problems(editor.path or editor.untitled_name, editor.display_name(), items)
+        if editor is self.editor() and self.assistant_dock.isVisible():
+            self.assistant.update_context()
 
     def _editor_idle(self, editor) -> None:
         page = editor.parent()
@@ -1418,6 +1422,7 @@ class MainWindow(QMainWindow):
             self.debug_panel.clear()
             self._clear_debug_lines()
         self._update_debug_actions()
+        self._note_run_error(code, tail)
         if code == 0 or not self.interp or self.settings.get("auto_install") == "never":
             return
         module = imports.missing_module_from_output(tail)
@@ -1427,6 +1432,34 @@ class MainWindow(QMainWindow):
         if key in self._runtime_attempted:
             return  # installed it once already and the import still fails: don't loop
         run_async(imports.resolve_missing, [module], on_done=lambda pkgs: self._offer_runtime_install(pkgs, key))
+
+    def _note_run_error(self, code: int, tail: str) -> None:
+        """Remember a failed run's traceback for the assistant and offer to have it fixed."""
+        err = assistant.error_excerpt(tail) if code != 0 and self._last_run else None
+        path = self._last_run[0] if self._last_run else None
+        self.last_run_error = (path, err) if err else None
+        for p in self.pages():
+            p.info.clear("run_error")
+        if self.assistant_dock.isVisible():
+            self.assistant.update_context()
+        if not err or not assistant.active_provider(self.settings) or imports.missing_module_from_output(tail):
+            return  # no AI set up, or a missing package (the install offer handles that)
+        page = self._find_page(path)
+        if page is None or (page.info.isVisible() and page.info.tag != "run_error"):
+            return
+        last = html.escape(err.strip().splitlines()[-1][:160])
+        page.info.show_message("error", f"The program failed: <b>{last}</b>",
+                               [("Fix with AI", lambda: self.fix_with_ai(path), True),
+                                ("Dismiss", lambda: page.info.clear("run_error"), False)], tag="run_error")
+
+    def fix_with_ai(self, path: str | None = None) -> None:
+        if path and not self.open_file(path):
+            return
+        page = self.page()
+        if page is not None:
+            page.info.clear("run_error")
+        self._show_dock(self.assistant_dock)
+        self.assistant.fix_errors()
 
     def _offer_runtime_install(self, pkgs, key) -> None:
         if not pkgs or not self.interp or key[0] != self.interp.path:

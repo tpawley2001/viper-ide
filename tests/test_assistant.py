@@ -285,3 +285,70 @@ def test_switch_provider_mid_conversation(server, server2, tmp_path, monkeypatch
         assert panel.provider.currentText() == "Ollama (local)"
     finally:
         win.close()
+
+
+def test_error_excerpt_and_context():
+    out = "starting\nTraceback (most recent call last):\n  File \"a.py\", line 3, in <module>\n    1/0\n" \
+          "ZeroDivisionError: division by zero\n"
+    err = assistant.error_excerpt(out)
+    assert err.startswith("Traceback") and err.endswith("ZeroDivisionError: division by zero")
+    syntax = assistant.error_excerpt('  File "a.py", line 1\n    def (\n        ^\nSyntaxError: invalid syntax\n')
+    assert syntax.startswith('  File "a.py"') and "SyntaxError" in syntax
+    assert assistant.error_excerpt("all fine\n") is None
+    assert len(assistant.error_excerpt(_TB_LONG)) <= assistant.MAX_ERROR_CHARS + 4
+    msg = assistant.context_message("a.py", "x = y\n", None,
+                                    [{"line": 1, "severity": "error", "message": "undefined name 'y'"}],
+                                    ("a.py", err))
+    assert "<problems>\nline 1: error: undefined name 'y'\n</problems>" in msg
+    assert "<run_error>\n" + err in msg and "The last time the user ran a.py" in msg
+
+
+_TB_LONG = "Traceback (most recent call last):\n" + "  File \"a.py\", line 1, in f\n" * 1000 + "RecursionError: x\n"
+
+
+def test_fix_errors_sends_traceback_and_problems(server, tmp_path, monkeypatch):
+    from test_gui import wait
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="m")], ai_provider="Fake")
+    src = tmp_path / "crash.py"
+    src.write_text("import os\n\n\ndef ratio(a, b):\n    return a / b\n\n\nprint(ratio(1, 0))\n")
+    win = MainWindow(settings, [str(src)])
+    win.show()
+    try:
+        assert wait(app, lambda: win.interp is not None, 30)
+        page = win.page()
+        assert wait(app, lambda: page.editor.lint_items, 20)  # "'os' imported but unused"
+        win.run_file(False)
+        assert wait(app, lambda: page.info.isVisible() and page.info.tag == "run_error", 30)
+        assert "ZeroDivisionError" in page.info.label.text()
+        assert win.last_run_error and win.last_run_error[0] == str(src)
+
+        FakeOpenAI.reply = "The divisor can be zero.\n\n<<<<<<< SEARCH\nprint(ratio(1, 0))\n=======\nprint(ratio(1, 1))\n>>>>>>> REPLACE\n"
+        page.info.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton)[0].click()
+        panel = win.assistant
+        assert wait(app, lambda: FakeOpenAI.requests and not panel.busy(), 20)
+        sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
+        assert "<run_error>" in sent and "ZeroDivisionError: division by zero" in sent
+        assert "<problems>" in sent and "imported but unused" in sent
+        assert "failed with the error shown" in sent
+        assert not page.info.isVisible() and panel.bar.tag == "edits"
+
+        # With "Include errors" off, neither is sent.
+        panel.include_errors.setChecked(False)
+        panel.input.setPlainText("just look")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
+        assert "<run_error>" not in sent and "<problems>" not in sent and "<file>" in sent
+    finally:
+        for p in win.pages():
+            p.editor.setModified(False)
+        win.close()

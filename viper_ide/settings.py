@@ -43,6 +43,7 @@ DEFAULTS: dict = {
     "ai_providers": [],            # [{name, base_url, api_key, env_key, model}], OpenAI-compatible servers
     "ai_provider": "",             # name of the one the assistant uses
     "ai_include_file": True,       # send the current file with each assistant message
+    "ai_include_errors": True,     # ...plus its lint problems and the last run's traceback
 }
 
 
