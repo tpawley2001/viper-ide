@@ -293,6 +293,25 @@ def clean_red(text: str, limit: int = MAX_RED_CHARS) -> str:
     return out
 
 
+MAX_PANEL_CHARS = 12_000
+
+
+def output_message(outputs: list[tuple[str, str]], limit: int = MAX_PANEL_CHARS) -> str:
+    """Everything the IDE's output panels show (Run, Terminal, Python console, Debugger), each trimmed to its end."""
+    parts = []
+    for where, text in outputs:
+        text = (text or "").strip("\n").rstrip()
+        if not text:
+            continue
+        if len(text) > limit:  # keep the end: that's the most recent output
+            text = "...\n" + text[-limit:]
+        parts.append(f'<panel_output source="{where}">\n{text}\n</panel_output>')
+    if not parts:
+        return ""
+    return ("The full text of the IDE's output panels, oldest first (commands the user typed are included; "
+            "red text also appears here):\n" + "\n".join(parts))
+
+
 def context_message(path: str, text: str, selection: tuple[int, int, str] | None,
                     problems: list[dict] | None = None, red: list[tuple[str, str]] | None = None) -> str:
     """The current file plus what the IDE shows about it: selection, lint problems, and red output.

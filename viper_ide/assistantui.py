@@ -121,12 +121,21 @@ class AssistantPanel(QWidget):
         self.include_errors.setChecked(bool(settings.get("ai_include_errors")))
         self.include_errors.toggled.connect(self._errors_toggled)
         self.include.toggled.connect(lambda on: self.include_errors.setEnabled(on))
+        self.include.toggled.connect(lambda _on: self.update_context())
         self.include_errors.setEnabled(self.include.isChecked())
+        self.include_output = QCheckBox("Include terminal output")
+        self.include_output.setToolTip("Send everything in the Run, Terminal, Python console and Debugger panels "
+                                       "(the most recent part of each if it's very long), even without a file")
+        self.include_output.setChecked(bool(settings.get("ai_include_output")))
+        self.include_output.toggled.connect(self._output_toggled)
         row = QHBoxLayout()
         row.addWidget(self.include)
         row.addWidget(self.include_errors)
-        row.addWidget(self.context_label, 1)
+        row.addWidget(self.include_output)
+        row.addStretch(1)
         lay.addLayout(row)
+        self.context_label.setWordWrap(True)
+        lay.addWidget(self.context_label)
 
         self.input = PromptEdit()
         self.input.setPlaceholderText("Ask a question or describe a change (Enter to send, Shift+Enter for a new line)")
@@ -295,6 +304,17 @@ class AssistantPanel(QWidget):
         self.settings.set("ai_include_errors", bool(on))
         self.update_context()
 
+    def _output_toggled(self, on: bool) -> None:
+        self.settings.set("ai_include_output", bool(on))
+        self.update_context()
+
+    def _outputs(self) -> list[tuple[str, str]]:
+        return self.host.panel_outputs() if self.include_output.isChecked() else []
+
+    @staticmethod
+    def _short(where: str) -> str:
+        return "notice" if where.startswith("Notice") else where.split(":")[0].replace(" panel", "").lower()
+
     def _errors_for(self, editor) -> tuple[list[dict], list[tuple[str, str]]]:
         """Lint problems for this editor and all red output in the IDE, if errors are included."""
         if not self.include_errors.isChecked():
@@ -302,9 +322,11 @@ class AssistantPanel(QWidget):
         return list(editor.lint_items), [(w, t) for w, t in self.host.red_outputs() if assistant.clean_red(t)]
 
     def update_context(self) -> None:
+        outputs = [self._short(w) for w, _t in self._outputs()]
+        output_note = "output from " + ", ".join(outputs) if outputs else ""
         e = self.host.editor()
-        if not e:
-            self.context_label.setText("")
+        if not e or not self.include.isChecked():
+            self.context_label.setText(output_note)
             return
         text = e.display_name()
         if e.hasSelectedText():
@@ -318,10 +340,11 @@ class AssistantPanel(QWidget):
         if red:
             sources = []
             for where, _t in red:
-                short = "notice" if where.startswith("Notice") else where.split(":")[0].replace(" panel", "").lower()
-                if short not in sources:
-                    sources.append(short)
+                if self._short(where) not in sources:
+                    sources.append(self._short(where))
             text += ", red text from " + ", ".join(sources)
+        if output_note:
+            text += ", " + output_note
         self.context_label.setText(text)
 
     def busy(self) -> bool:
@@ -338,7 +361,7 @@ class AssistantPanel(QWidget):
         self.bar.clear()
         self._pending = None
         e = self.host.editor()
-        content = text
+        context = []
         if self.include.isChecked() and e is not None:
             selection = None
             if e.hasSelectedText():
@@ -347,11 +370,15 @@ class AssistantPanel(QWidget):
                     lt -= 1
                 selection = (lf + 1, lt + 1, e.selectedText())
             problems, red = self._errors_for(e)
-            content = assistant.context_message(e.path or e.display_name(), e.text(), selection, problems,
-                                                red) + "\n\n" + text
+            context.append(assistant.context_message(e.path or e.display_name(), e.text(), selection, problems,
+                                                     red))
             self._target = (e, e.path or e.display_name())
         else:
             self._target = None
+        output = assistant.output_message(self._outputs())
+        if output:
+            context.append(output)
+        content = "\n\n".join([*context, text])
         messages = [{"role": "system", "content": assistant.SYSTEM_PROMPT}, *self.history,
                     {"role": "user", "content": content}]
         self.history.append({"role": "user", "content": text})

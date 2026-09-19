@@ -60,6 +60,12 @@ the file. **Fix Errors with AI** (`Ctrl+Shift+I`, in the Code menu and the edito
 all of it with a request to fix it. The line under the prompt box shows what will be sent, e.g.
 *warn.py, 1 problem, red text from run, python console*.
 
+**Terminal output:** with **Include terminal output** ticked (the default), each message also carries the
+full text of the **Run** panel, the **Terminal**, the **Python console** and the **debugger console**:
+normal output, red output, and the commands you typed, not just errors. Very long panels are trimmed to
+their most recent 12,000 characters. This works even with **Send the current file** unticked, so you can ask
+*"why did that pip install fail?"* without sending code. Clear a panel to stop sending it.
+
 The chat follows the newest text. Scroll up to read and it stays put; scroll back down, or send a
 message, and it follows again.
 

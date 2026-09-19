@@ -1461,6 +1461,24 @@ class MainWindow(QMainWindow):
                 out.append((where, re.sub(r"<[^>]+>", "", text)))
         return out
 
+    def panel_outputs(self) -> list[tuple[str, str]]:
+        """The full text of every output panel, as (where, text), for the AI assistant."""
+        out = []
+        run = self.run_panel.view.toPlainText()
+        if run.strip():
+            where = "Run panel"
+            if self._last_run:
+                where += f": output of the last run of {os.path.basename(self._last_run[0])}"
+                if self.run_panel.running() or self.debug.active:
+                    where += ", still running"
+            out.append((where, run))
+        for where, view in (("Terminal", self.terminal.view), ("Python console", self.console.view),
+                            ("Debugger console", self.debug_panel.console)):
+            text = view.toPlainText()
+            if text.strip():
+                out.append((where, text))
+        return out
+
     def _note_run_error(self, code: int, tail: str) -> None:
         """Remember a failed run's traceback for the assistant and offer to have it fixed."""
         self._last_exit = code

@@ -486,6 +486,61 @@ def test_red_output_from_everywhere_reaches_the_assistant(app, server, tmp_path,
         win.close()
 
 
+def test_output_message_trims_to_the_end():
+    out = assistant.output_message([("Terminal", "$ ls\n" + "x" * 50 + "END"), ("Python console", "  \n")], limit=20)
+    assert '<panel_output source="Terminal">' in out and out.count("<panel_output") == 1
+    assert "END" in out and "$ ls" not in out
+    assert assistant.output_message([("Run panel", "")]) == ""
+
+
+def test_terminal_output_reaches_the_assistant(app, server, tmp_path, monkeypatch):
+    from test_gui import wait
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="m")], ai_provider="Fake")
+    src = tmp_path / "hello.py"
+    src.write_text("print('hello from the run')\n")
+    win = MainWindow(settings, [str(src)])
+    win.show()
+    try:
+        assert wait(app, lambda: win.interp is not None, 30)
+        win.run_file(False)
+        assert wait(app, lambda: "exited with code 0" in win.run_panel.view.toPlainText(), 30)
+        win.terminal.input.setText("echo terminal-says-hi")
+        win.terminal._submit()
+        assert wait(app, lambda: win.terminal.view.toPlainText().count("terminal-says-hi") >= 2, 30)
+
+        panel = win.assistant
+        win.show_assistant()
+        assert panel.include_output.isChecked()  # on by default
+        panel.include.setChecked(False)  # terminal output goes along even without the file
+        assert panel.context_label.text() == "output from run, terminal"
+        panel.input.setPlainText("what happened?")
+        panel.send()
+        assert wait(app, lambda: FakeOpenAI.requests and not panel.busy(), 20)
+        sent = FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
+        assert "<file>" not in sent and sent.endswith("what happened?")
+        assert '<panel_output source="Run panel: output of the last run of hello.py">' in sent
+        assert "hello from the run" in sent and "exited with code 0" in sent
+        assert '<panel_output source="Terminal">' in sent and "echo terminal-says-hi" in sent
+
+        panel.include_output.setChecked(False)
+        assert settings.get("ai_include_output") is False and panel.context_label.text() == ""
+        panel.input.setPlainText("again")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        assert "panel_output" not in FakeOpenAI.requests[-1]["body"]["messages"][-1]["content"]
+    finally:
+        win.terminal.stop()
+        for p in win.pages():
+            p.editor.setModified(False)
+        win.close()
+
+
 def test_chat_stays_scrolled_to_the_bottom(app, server, tmp_path, monkeypatch):
     from test_gui import wait
     monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
