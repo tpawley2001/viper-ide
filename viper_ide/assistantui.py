@@ -18,6 +18,7 @@ from .widgets import InfoBar
 from .workers import run_async
 
 _OPEN_BLOCK = re.compile(r"^[ \t]*<{5,9} ?SEARCH", re.MULTILINE)
+_OPEN_NEW_FILE = re.compile(r"^[ \t]*<{5,9} ?NEW[ _]FILE\b:?[ \t]*([^\n]*)\n?", re.MULTILINE)
 
 
 def display_markdown(reply: str) -> str:
@@ -27,7 +28,15 @@ def display_markdown(reply: str) -> str:
         lines = [f"- {x}" for x in search.split("\n")] if search else []
         lines += [f"+ {x}" for x in replace.split("\n")] if replace else []
         return "```diff\n" + "\n".join(lines) + "\n```"
-    out = assistant._BLOCK.sub(fence, reply)
+
+    def new_file(m, closed=True):
+        body = assistant._strip_fence(m.group(2)) if closed else ""
+        return f"**New tab: {assistant.safe_file_name(m.group(1))}**\n\n```python\n{body}" + ("\n```" if closed else "")
+    out = assistant._NEW_FILE.sub(new_file, reply)
+    out = assistant._BLOCK.sub(fence, out)
+    m = _OPEN_NEW_FILE.search(out)  # a new file still streaming in
+    if m:
+        return out[:m.start()] + new_file(m, closed=False) + out[m.end():] + "\n```"
     m = _OPEN_BLOCK.search(out)  # a block still streaming in
     if m:
         out = out[:m.start()] + "```\n" + out[m.start():] + "\n```"
@@ -410,11 +419,38 @@ class AssistantPanel(QWidget):
         self.history.append({"role": "assistant", "content": reply})
         self._transcript.append(("assistant", reply))
         self._render()
+        new_files = assistant.parse_new_files(reply)
+        if new_files:
+            self.open_new_files(new_files)
         edits = assistant.parse_edits(reply)
         if edits and self._target:
             self._offer_edits(edits)
         elif edits:
             self.status.setText("The reply has edits, but no file was sent, so there is nothing to apply them to.")
+
+    # ----------------------------------------------------------- new files
+    def open_new_files(self, files) -> list:
+        """Open each NEW FILE block in its own tab. A name that's already open unsaved gets its contents replaced
+        (one undo step), so a revised version doesn't pile up duplicate tabs. Returns the editors."""
+        editors = []
+        for f in files:
+            text = f.content if not f.content or f.content.endswith("\n") else f.content + "\n"
+            page = next((p for p in self.host.pages() if not p.editor.path and p.editor.untitled_name == f.name),
+                        None)
+            if page is not None:
+                page.editor.set_text_undoable(text)
+                self.host.tabs.setCurrentWidget(page)
+            else:
+                page = self.host.new_file()
+                page.editor.untitled_name = f.name  # also what Save As suggests
+                page.editor.setText(text)
+                page.editor.setModified(True)
+            self.host._refresh_tab(page)
+            self.host._editor_idle(page.editor)
+            editors.append(page.editor)
+        names = ", ".join(f.name for f in files)
+        self.status.setText(f"Opened {names} in {'a new tab' if len(files) == 1 else 'new tabs'} (not saved yet).")
+        return editors
 
     # --------------------------------------------------------------- edits
     def _offer_edits(self, edits) -> None:
@@ -487,7 +523,8 @@ class AssistantPanel(QWidget):
             if assistant.active_provider(self.settings):
                 intro = ("Ask about the open file, or describe a change, e.g. *\"add type hints\"* or "
                          "*\"handle a missing file in load()\"*. Select code first to focus on it. Suggested "
-                         "edits are shown as a diff before anything changes.")
+                         "edits are shown as a diff before anything changes. Ask for a *\"new file\"* or *\"new tab\"* "
+                         "and the code opens in a tab of its own.")
             else:
                 intro = ("**No AI provider set up.** Press **Manage...** above and add one: OpenAI, OpenRouter, "
                          "Gemini, Groq, Mistral or DeepSeek (with an API key), a local Ollama, LM Studio or "

@@ -12,6 +12,13 @@ small local models reproduce a few lines far more reliably than a whole file:
     =======
     their replacement
     >>>>>>> REPLACE
+
+Code that belongs in a file of its own comes back as a NEW FILE block, which the IDE
+opens in a new editor tab:
+
+    <<<<<<< NEW FILE: name.py
+    the whole file
+    >>>>>>> END
 """
 from __future__ import annotations
 
@@ -45,7 +52,18 @@ Rules for edit blocks:
 - To delete code, leave the replacement empty.
 - To create or entirely rewrite an empty file, use an empty SEARCH section.
 - Never use line numbers, "..." or placeholders; do not wrap blocks in markdown fences.
-- Only edit the file you were shown."""
+- Edit blocks only apply to the file you were shown.
+
+When the user asks for a new file, a new tab, a separate script or module, or code that
+doesn't belong in the current file, don't edit the current file. Write the code as a new
+file instead; the IDE opens each one in its own editor tab:
+
+<<<<<<< NEW FILE: short_descriptive_name.py
+the complete contents of the new file
+>>>>>>> END
+
+Write the whole file (no placeholders or "..."), and don't wrap it in markdown fences.
+Repeating a NEW FILE block with the same name replaces that tab's contents."""
 
 
 class AssistantError(Exception):
@@ -56,6 +74,12 @@ class AssistantError(Exception):
 class Edit:
     search: str
     replace: str
+
+
+@dataclass
+class NewFile:
+    name: str
+    content: str
 
 
 def normalise_base(url: str) -> str:
@@ -303,8 +327,33 @@ _BLOCK = re.compile(
     re.DOTALL | re.MULTILINE)
 
 
+_NEW_FILE = re.compile(
+    r"^[ \t]*<{5,9} ?NEW[ _]FILE\b:?[ \t]*([^\n]*)\n(.*?)^[ \t]*>{5,9} ?END\b[^\n]*$",
+    re.DOTALL | re.MULTILINE)
+DEFAULT_NEW_FILE = "new_file.py"
+
+
 def parse_edits(reply: str) -> list[Edit]:
+    reply = _NEW_FILE.sub("", reply)  # a new file's contents are never edits to the current one
     return [Edit(_strip_fence(m.group(1)), _strip_fence(m.group(2))) for m in _BLOCK.finditer(reply)]
+
+
+def parse_new_files(reply: str) -> list[NewFile]:
+    """NEW FILE blocks, in order; a name given twice keeps its last contents."""
+    files: dict[str, str] = {}
+    for m in _NEW_FILE.finditer(reply):
+        name = safe_file_name(m.group(1))
+        files.pop(name, None)
+        files[name] = _strip_fence(m.group(2))
+    return [NewFile(n, c) for n, c in files.items()]
+
+
+def safe_file_name(name: str) -> str:
+    """A bare file name from whatever the model wrote after NEW FILE: (no directories or quoting)."""
+    name = name.strip().strip("`'\"*").strip()
+    name = re.split(r"[\\/]", name)[-1]
+    name = re.sub(r'[<>:"|?*\x00-\x1f]', "", name).strip(" .")
+    return name or DEFAULT_NEW_FILE
 
 
 def _strip_fence(section: str) -> str:

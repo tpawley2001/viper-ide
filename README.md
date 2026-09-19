@@ -44,6 +44,12 @@ llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without l
 4. The assistant proposes edits as SEARCH/REPLACE blocks. **Review & Apply** shows a diff and applies
    it as **one undo step** (`Ctrl+Z` reverts all of it). Nothing changes until you apply. Blocks that don't
    match are listed, and **Ask to Fix** sends them back to the model.
+5. Ask for a **new file** or **new tab** (*"write a CSV loader in a new tab"*, *"move the helpers into their
+   own module"*) and the assistant answers with a `NEW FILE: name.py` block instead of editing your file.
+   Each one opens straight away in its own unsaved editor tab named after it (**Save As** suggests that name),
+   so your current file is left alone. A reply can mix new files with edits to the open file. If the model
+   sends a revised version of a file it already opened, that tab's contents are replaced (one undo step)
+   rather than opening a duplicate.
 
 **Errors:** with **Include errors** ticked (the default), each message also carries the file's problems
 from the checker (pyflakes, as in the Problems panel) and **everything Viper is showing in red**: the last

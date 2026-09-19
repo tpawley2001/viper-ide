@@ -65,6 +65,46 @@ def test_empty_search_fills_empty_file():
     assert new == "print('hi')\n" and not problems
 
 
+NEW_FILE_REPLY = """Put the helper in its own module.
+
+<<<<<<< NEW FILE: `utils/stats.py`
+```python
+def mean(xs):
+    return sum(xs) / len(xs)
+```
+>>>>>>> END
+
+<<<<<<< SEARCH
+print(add(2, 3))
+=======
+from stats import mean
+print(add(2, 3), mean([1, 2]))
+>>>>>>> REPLACE
+"""
+
+
+def test_parse_new_files():
+    files = assistant.parse_new_files(NEW_FILE_REPLY)
+    assert [(f.name, f.content) for f in files] == [("stats.py", "def mean(xs):\n    return sum(xs) / len(xs)")]
+    assert len(assistant.parse_edits(NEW_FILE_REPLY)) == 1
+    # A SEARCH/REPLACE block inside a new file's contents is file content, not an edit.
+    nested = "<<<<<<< NEW FILE: a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n>>>>>>> END\n"
+    assert assistant.parse_edits(nested) == [] and len(assistant.parse_new_files(nested)) == 1
+    assert assistant.safe_file_name(' "C:\\x\\..\\my:file?.py" ') == "myfile.py"
+    assert assistant.safe_file_name("``") == assistant.DEFAULT_NEW_FILE
+    twice = "<<<<<<< NEW FILE: a.py\n1\n>>>>>>> END\n<<<<<<< NEW FILE: a.py\n2\n>>>>>>> END\n"
+    assert [(f.name, f.content) for f in assistant.parse_new_files(twice)] == [("a.py", "2")]
+
+
+def test_display_markdown_shows_new_files():
+    from viper_ide.assistantui import display_markdown
+
+    out = display_markdown(NEW_FILE_REPLY)
+    assert "**New tab: stats.py**" in out and "NEW FILE" not in out and "```diff" in out
+    partial = display_markdown("Sure.\n\n<<<<<<< NEW FILE: x.py\nimport os\n")
+    assert partial.endswith("```python\nimport os\n\n```") and "**New tab: x.py**" in partial
+
+
 def test_normalise_base():
     assert assistant.normalise_base("localhost:8080/v1/") == "http://localhost:8080/v1"
     assert assistant.normalise_base("https://api.openai.com/v1/chat/completions") == "https://api.openai.com/v1"
@@ -216,6 +256,49 @@ def test_assistant_dock_edits_the_file(app, server, tmp_path, monkeypatch):
         sent = FakeOpenAI.requests[-1]["body"]["messages"]
         assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
         assert sent[1]["content"] == "add type hints" and "<file>" in sent[3]["content"]
+    finally:
+        for p in win.pages():
+            p.editor.setModified(False)
+        win.close()
+
+
+def test_assistant_opens_new_files_in_tabs(app, server, tmp_path, monkeypatch):
+    from test_gui import wait
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide.app import MainWindow
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    settings._data.update(interpreter=sys.executable, extra_interpreters=[sys.executable],
+                          ai_providers=[dict(assistant.new_provider("Fake", server), model="fake-coder")],
+                          ai_provider="Fake")
+    src = tmp_path / "calc.py"
+    src.write_text(SOURCE)
+    win = MainWindow(settings, [str(src)])
+    win.show()
+    try:
+        FakeOpenAI.reply = NEW_FILE_REPLY
+        panel = win.assistant
+        win.a["ask_ai"].trigger()
+        panel.input.setPlainText("move mean into a new file")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        assert win.tabs.count() == 2
+        new = win.editor()
+        assert new.path is None and new.display_name() == "stats.py" and new.isModified()
+        assert new.text() == "def mean(xs):\n    return sum(xs) / len(xs)\n"
+        assert "stats.py" in win.tabs.tabText(win.tabs.currentIndex())
+        # The SEARCH/REPLACE part still targets the file that was sent.
+        assert panel.bar.tag == "edits" and panel._pending[0].path == str(src)
+
+        # A revised version of the same file replaces the tab instead of opening another.
+        FakeOpenAI.reply = "<<<<<<< NEW FILE: stats.py\ndef mean(xs):\n    return sum(xs) / max(len(xs), 1)\n>>>>>>> END\n"
+        panel.input.setPlainText("guard against empty lists")
+        panel.send()
+        assert wait(app, lambda: not panel.busy(), 20)
+        assert win.tabs.count() == 2 and win.editor() is new and "max(len(xs), 1)" in new.text()
+        new.undo()
+        assert "max(" not in new.text()
     finally:
         for p in win.pages():
             p.editor.setModified(False)
