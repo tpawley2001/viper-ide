@@ -45,6 +45,7 @@ DEFAULTS: dict = {
     "ai_include_file": True,       # send the current file with each assistant message
     "ai_include_errors": True,     # ...plus its lint problems and the last run's traceback
     "ai_include_output": True,     # send the full text of the Run/Terminal/Console/Debugger panels
+    "ai_show_code": False,         # show edit/new-file code in the chat (off: a summary + Review & Apply)
 }
 
 

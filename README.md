@@ -56,6 +56,10 @@ llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without l
    so your current file is left alone. A reply can mix new files with edits to the open file. If the model
    sends a revised version of a file it already opened, that tab's contents are replaced (one undo step)
    rather than opening a duplicate.
+6. The chat stays readable: it shows only the assistant's explanation. The code of its edits and new files is
+   left out and replaced by a one-line summary (*"2 edits to calc.py - Review & Apply"*, *"New tab: stats.py -
+   Show"*), so you see the code in the diff or its tab. The links keep working for earlier replies too. Press
+   **`</>`** above the chat to show the code inline again.
 
 **Errors:** with **Include errors** ticked (the default), each message also carries the file's problems
 from the checker (pyflakes, as in the Problems panel) and **everything Viper is showing in red**: the last

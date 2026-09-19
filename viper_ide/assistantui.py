@@ -5,9 +5,11 @@ import html
 import os
 import re
 import threading
+from urllib.parse import quote, unquote
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
                              QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -21,8 +23,15 @@ _OPEN_BLOCK = re.compile(r"^[ \t]*<{5,9} ?SEARCH", re.MULTILINE)
 _OPEN_NEW_FILE = re.compile(r"^[ \t]*<{5,9} ?NEW[ _]FILE\b:?[ \t]*([^\n]*)\n?", re.MULTILINE)
 
 
-def display_markdown(reply: str) -> str:
-    """Show edit blocks as diff fences (raw ``=======`` lines would render as headings)."""
+_EMPTY_FENCE = re.compile(r"^[ \t]*```[^\n]*\n\s*^[ \t]*```[ \t]*$", re.MULTILINE)
+
+
+def display_markdown(reply: str, show_code: bool = True, summary: str = "") -> str:
+    """Show edit blocks as diff fences (raw ``=======`` lines would render as headings). With ``show_code`` off
+    the edit and new-file blocks are left out (they're seen in Review & Apply or their tab) and ``summary``, a
+    line saying what they were, goes at the end instead."""
+    if not show_code:
+        return compact_markdown(reply, summary)
     def fence(m):
         search, replace = assistant._strip_fence(m.group(1)), assistant._strip_fence(m.group(2))
         lines = [f"- {x}" for x in search.split("\n")] if search else []
@@ -40,6 +49,22 @@ def display_markdown(reply: str) -> str:
     m = _OPEN_BLOCK.search(out)  # a block still streaming in
     if m:
         out = out[:m.start()] + "```\n" + out[m.start():] + "\n```"
+    return out
+
+
+def compact_markdown(reply: str, summary: str = "") -> str:
+    out = assistant._BLOCK.sub("", assistant._NEW_FILE.sub("", reply))
+    m = _OPEN_NEW_FILE.search(out)  # a new file still streaming in
+    if m:
+        out = out[:m.start()] + f"\n\n_Writing {assistant.safe_file_name(m.group(1))}..._"
+    else:
+        m = _OPEN_BLOCK.search(out)  # an edit still streaming in
+        if m:
+            out = out[:m.start()] + "\n\n_Writing an edit..._"
+    out = _EMPTY_FENCE.sub("", out)  # fences the model wrapped around the blocks despite being told not to
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    if summary:
+        out = f"{out}\n\n{summary}" if out else summary
     return out
 
 
@@ -66,6 +91,7 @@ class AssistantPanel(QWidget):
         self._cancel: threading.Event | None = None
         self._target = None              # (editor, path) the last request was about
         self._pending: tuple | None = None
+        self._actions: dict[int, dict] = {}  # transcript index -> the reply's edits / new files
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
@@ -96,12 +122,19 @@ class AssistantPanel(QWidget):
         self.new_chat.setToolTip("New conversation")
         self.new_chat.clicked.connect(self.clear)
         top.addWidget(self.new_chat)
+        self.show_code = QToolButton(text="</>", checkable=True)
+        self.show_code.setToolTip("Show the code of suggested edits and new files in the chat. Off: the chat shows "
+                                  "a summary and the code is seen in Review && Apply or its tab")
+        self.show_code.setChecked(bool(settings.get("ai_show_code")))
+        self.show_code.toggled.connect(self._show_code_toggled)
+        top.addWidget(self.show_code)
         lay.addLayout(top)
 
         self.bar = InfoBar(self)
         lay.addWidget(self.bar)
         self.view = QTextBrowser()
-        self.view.setOpenExternalLinks(True)
+        self.view.setOpenLinks(False)
+        self.view.anchorClicked.connect(self._link_clicked)
         # Follow the newest text unless the user scrolls up to read; scrolling back down resumes following.
         self._follow = True
         self.view.verticalScrollBar().valueChanged.connect(self._scrolled)
@@ -304,6 +337,10 @@ class AssistantPanel(QWidget):
         self.settings.set("ai_include_errors", bool(on))
         self.update_context()
 
+    def _show_code_toggled(self, on: bool) -> None:
+        self.settings.set("ai_show_code", bool(on))
+        self._render()
+
     def _output_toggled(self, on: bool) -> None:
         self.settings.set("ai_include_output", bool(on))
         self.update_context()
@@ -408,6 +445,7 @@ class AssistantPanel(QWidget):
         self._transcript.clear()
         self._streaming = ""
         self._pending = None
+        self._actions.clear()
         self.bar.clear()
         self._render()
 
@@ -445,11 +483,18 @@ class AssistantPanel(QWidget):
                     "or a larger output limit on the server.)_"
         self.history.append({"role": "assistant", "content": reply})
         self._transcript.append(("assistant", reply))
-        self._render()
         new_files = assistant.parse_new_files(reply)
+        edits = assistant.parse_edits(reply)
+        action = {}
+        if new_files:
+            action["files"] = new_files
+        if edits and self._target:
+            action["edits"] = (*self._target, edits)
+        if action:
+            self._actions[len(self._transcript) - 1] = action
+        self._render()
         if new_files:
             self.open_new_files(new_files)
-        edits = assistant.parse_edits(reply)
         if edits and self._target:
             self._offer_edits(edits)
         elif edits:
@@ -482,7 +527,8 @@ class AssistantPanel(QWidget):
     # --------------------------------------------------------------- edits
     def _offer_edits(self, edits) -> None:
         editor, name = self._target
-        self._pending = (editor, name, edits)
+        action = self._actions.get(len(self._transcript) - 1, {})
+        self._pending = action.get("edits") or (editor, name, edits)
         base = os.path.basename(name)
         self.bar.show_message("info", f"The assistant suggested <b>{len(edits)}</b> edit{'s' if len(edits) != 1 else ''}"
                               f" to <b>{html.escape(base)}</b>.",
@@ -513,7 +559,11 @@ class AssistantPanel(QWidget):
         if sip.isdeleted(editor):
             return False
         editor.set_text_undoable(new)  # a single undo step reverts the whole change
+        for action in self._actions.values():
+            if action.get("edits") is self._pending:
+                action["applied"] = True
         self._pending = None
+        self._render()
         self.bar.clear("edits")
         self.status.setText(f"Applied to {base} (Ctrl+Z to undo).")
         page = self.host._find_page(editor.path) if editor.path else None
@@ -527,6 +577,54 @@ class AssistantPanel(QWidget):
                                 "\nPlease resend them with SEARCH text copied exactly from the current file.")
         self.include.setChecked(True)
         self.send()
+
+    # ------------------------------------------------------- chat links
+    def _link_clicked(self, url) -> None:
+        if url.scheme() != "viper":
+            QDesktopServices.openUrl(url)
+            return
+        kind, _, rest = unquote(url.path(QUrl.ComponentFormattingOption.FullyEncoded)).partition("/")
+        index, _, name = rest.partition("/")
+        action = self._actions.get(int(index)) if index.isdigit() else None
+        if not action:
+            return
+        if kind == "review" and action.get("edits"):
+            self._pending = action["edits"]
+            self.review_edits()
+        elif kind == "file":
+            self.show_new_file(next((f for f in action.get("files", []) if f.name == name), None))
+
+    def show_new_file(self, f) -> None:
+        """Switch to the tab a NEW FILE block opened, or open it again if that tab was saved or closed."""
+        if f is None:
+            return
+        page = next((p for p in self.host.pages() if not p.editor.path and p.editor.untitled_name == f.name), None)
+        if page is not None:
+            self.host.tabs.setCurrentWidget(page)
+        else:
+            self.open_new_files([f])
+
+    def _summary(self, index: int) -> str:
+        action = self._actions.get(index)
+        if not action:
+            return ""
+        lines = []
+        for f in action.get("files", []):
+            count = len(f.content.splitlines())
+            lines.append(f"**New tab: {f.name}** ({count} line{'s' if count != 1 else ''}) - "
+                         f"[Show]({self._link('file', index, f.name)})")
+        if action.get("edits"):
+            _editor, name, edits = action["edits"]
+            what = f"**{len(edits)} edit{'s' if len(edits) != 1 else ''} to {os.path.basename(name)}**"
+            if action.get("applied"):
+                lines.append(f"{what} - applied - [Review again]({self._link('review', index)})")
+            else:
+                lines.append(f"{what} - [Review & Apply]({self._link('review', index)})")
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def _link(kind: str, index: int, name: str = "") -> str:
+        return f"viper:{kind}/{index}" + (f"/{quote(name)}" if name else "")
 
     # -------------------------------------------------------------- render
     _rendering = False
@@ -560,17 +658,20 @@ class AssistantPanel(QWidget):
             self.view.setMarkdown(intro)
             return
         parts = []
-        for role, text in self._transcript:
+        show_code = self.show_code.isChecked()
+        for i, (role, text) in enumerate(self._transcript):
             if role == "user":
                 parts.append("**You**\n\n" + text)
             elif role == "assistant":
-                parts.append("**Assistant**\n\n" + display_markdown(text))
+                # Edits with no file to apply them to have nowhere else to be seen, so they stay in the chat.
+                keep = show_code or (assistant.parse_edits(text) and "edits" not in self._actions.get(i, {}))
+                parts.append("**Assistant**\n\n" + display_markdown(text, bool(keep), self._summary(i)))
             elif role == "note":
                 parts.append(f"_{text}_")
             else:
                 parts.append("**Error:** " + text)
         if self._streaming:
-            parts.append("**Assistant**\n\n" + display_markdown(self._streaming))
+            parts.append("**Assistant**\n\n" + display_markdown(self._streaming, show_code))
         follow = self._follow
         self._rendering = True
         self.view.setMarkdown("\n\n---\n\n".join(parts))  # resets the scroll position to the top

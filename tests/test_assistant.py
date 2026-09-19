@@ -105,6 +105,20 @@ def test_display_markdown_shows_new_files():
     assert partial.endswith("```python\nimport os\n\n```") and "**New tab: x.py**" in partial
 
 
+def test_compact_chat_hides_the_code():
+    from viper_ide.assistantui import display_markdown
+
+    out = display_markdown(NEW_FILE_REPLY, show_code=False, summary="SUMMARY")
+    assert "NEW FILE" not in out and "SEARCH" not in out and "```" not in out and "mean(" not in out
+    assert out.endswith("SUMMARY")
+    fenced = "Here you go.\n\n```python\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```\n\nDone."
+    assert display_markdown(fenced, show_code=False) == "Here you go.\n\nDone."
+    assert display_markdown("Ok.\n\n<<<<<<< SEARCH\nimport os\n", show_code=False) == "Ok.\n\n_Writing an edit..._"
+    assert display_markdown("Ok.\n<<<<<<< NEW FILE: a.py\nx = 1\n", show_code=False).endswith("_Writing a.py..._")
+    # Ordinary example code in an answer is still shown.
+    assert "print(1)" in display_markdown("Try:\n\n```python\nprint(1)\n```", show_code=False)
+
+
 def test_normalise_base():
     assert assistant.normalise_base("localhost:8080/v1/") == "http://localhost:8080/v1"
     assert assistant.normalise_base("https://api.openai.com/v1/chat/completions") == "https://api.openai.com/v1"
@@ -248,6 +262,17 @@ def test_assistant_dock_edits_the_file(app, server, tmp_path, monkeypatch):
         assert page.editor.isModified()
         page.editor.undo()
         assert page.editor.text() == SOURCE  # the whole change is one undo step
+
+        # The chat shows the explanation and a Review & Apply link, not the code.
+        chat = panel.view.toPlainText()
+        assert "SEARCH" not in chat and "applied" in chat and "Review again" in chat
+        from PyQt6.QtCore import QUrl
+        panel._link_clicked(QUrl(panel._link("review", 1)))
+        assert page.editor.text().startswith("def add(a: int, b: int) -> int:")  # the link re-applies it
+        page.editor.undo()
+        panel.show_code.setChecked(True)
+        assert "SEARCH" not in panel.view.toPlainText() and "def add(a: int" in panel.view.toPlainText()
+        panel.show_code.setChecked(False)
 
         # Follow-up turns carry the history but only the newest message has the file.
         panel.input.setPlainText("thanks")
