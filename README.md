@@ -5,6 +5,12 @@ you don't have, and installs it for you.
 
 ![Viper logo](viper_ide/resources/viper.png)
 
+## Download
+
+Get the Windows installer (`ViperIDE_Setup_x.y.z.exe`) from
+[Releases](https://github.com/tpawley2001/viper-ide/releases/latest). It installs
+per-user and doesn't need admin rights.
+
 ## Smart downloads
 
 Viper watches what your code needs and gets it, instead of leaving you to decode
