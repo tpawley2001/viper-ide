@@ -143,7 +143,8 @@ class FakeOpenAI(BaseHTTPRequestHandler):
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         FakeOpenAI.requests.append({"auth": self.headers.get("Authorization"), "body": data,
-                                    "port": self.server.server_address[1]})
+                                    "port": self.server.server_address[1],
+                                    "integration": self.headers.get("Copilot-Integration-Id")})
         if not FakeOpenAI.stream:
             body = json.dumps({"choices": [{"message": {"role": "assistant", "content": FakeOpenAI.reply}}]}).encode()
             self.send_response(200)
@@ -387,6 +388,121 @@ def test_switch_provider_mid_conversation(app, server, server2, tmp_path, monkey
         assert panel.provider.currentText() == "Custom"
     finally:
         win.close()
+
+
+class FakeGitHub(BaseHTTPRequestHandler):
+    """GitHub's device-flow sign-in plus the Copilot session-token endpoint."""
+    api = ""
+    polls = 0
+    sessions = 0
+
+    def log_message(self, *a):
+        pass
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        form = self.rfile.read(int(self.headers["Content-Length"])).decode()
+        if self.path == "/login/device/code":
+            assert "client_id=" in form
+            self._json({"device_code": "dev-1", "user_code": "ABCD-1234", "interval": 0, "expires_in": 60,
+                        "verification_uri": "https://github.com/login/device"})
+        else:
+            FakeGitHub.polls += 1
+            self._json({"error": "authorization_pending"} if FakeGitHub.polls == 1 else
+                       {"access_token": "gho_account", "token_type": "bearer"})
+
+    def do_GET(self):
+        auth = self.headers.get("Authorization")
+        if auth != "token gho_account":
+            return self._json({"message": "Bad credentials"}, 401)
+        if self.path == "/user":
+            return self._json({"login": "octocat"})
+        FakeGitHub.sessions += 1
+        self._json({"token": f"tid=session-{FakeGitHub.sessions}", "expires_at": 9_999_999_999,
+                    "endpoints": {"api": FakeGitHub.api}})
+
+
+@pytest.fixture
+def github(server, monkeypatch):
+    from viper_ide import copilot
+    FakeGitHub.api, FakeGitHub.polls, FakeGitHub.sessions = server.rsplit("/v1", 1)[0] + "/v1", 0, 0
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGitHub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    gh = f"http://127.0.0.1:{srv.server_address[1]}"
+    monkeypatch.setattr(copilot, "DEVICE_CODE_URL", gh + "/login/device/code")
+    monkeypatch.setattr(copilot, "ACCESS_TOKEN_URL", gh + "/login/oauth/access_token")
+    monkeypatch.setattr(copilot, "SESSION_URL", gh + "/copilot_internal/v2/token")
+    monkeypatch.setattr(copilot, "USER_URL", gh + "/user")
+    copilot._sessions.clear()
+    yield copilot
+    copilot._sessions.clear()
+    srv.shutdown()
+
+
+def test_copilot_sign_in_and_chat(github):
+    flow = github.start_sign_in()
+    assert flow["user_code"] == "ABCD-1234"
+    token = github.finish_sign_in(flow, threading.Event())
+    assert token == "gho_account" and FakeGitHub.polls == 2
+    assert github.account_name(token) == "octocat"
+
+    p = dict(assistant.new_copilot_provider(), api_key=token, model="gpt-4o")
+    text = assistant.provider_chat(p, p["model"], [{"role": "user", "content": "hi"}])
+    assert text == REPLY
+    req = FakeOpenAI.requests[-1]
+    assert req["auth"] == "Bearer tid=session-1" and req["integration"] == "vscode-chat"
+    assistant.provider_chat(p, p["model"], [{"role": "user", "content": "again"}])
+    assert FakeGitHub.sessions == 1  # the session token is reused until it nears expiry
+
+
+def test_copilot_errors_and_cancel(github):
+    p = assistant.new_copilot_provider()
+    with pytest.raises(assistant.AssistantError, match="Not signed in"):
+        assistant.provider_chat(p, "m", [])
+    with pytest.raises(assistant.AssistantError, match="Sign in"):
+        assistant.provider_chat(dict(p, api_key="gho_revoked"), "m", [])
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(github.CopilotError, match="cancelled"):
+        github.finish_sign_in({"device_code": "d", "interval": 1}, cancel)
+
+
+def test_copilot_model_list_keeps_chat_models():
+    from viper_ide import copilot
+    data = {"data": [{"id": "gpt-4o", "capabilities": {"type": "chat"}, "model_picker_enabled": True},
+                     {"id": "text-embedding-3-small", "capabilities": {"type": "embeddings"}},
+                     {"id": "gpt-4o-2024-05-13", "capabilities": {"type": "chat"}, "model_picker_enabled": False},
+                     {"id": "claude-sonnet-4", "capabilities": {"type": "chat"}}]}
+    assert copilot.chat_models(data) == ["claude-sonnet-4", "gpt-4o"]
+
+
+def test_copilot_provider_in_the_dialog(app, github, tmp_path, monkeypatch):
+    from test_gui import wait
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "home"))
+    from viper_ide import providersui
+    from viper_ide.settings import Settings
+
+    settings = Settings(tmp_path / "settings.json")
+    # The real sign-in dialog waits for a browser; stand in for the user approving the code.
+    monkeypatch.setattr(providersui, "CopilotSignInDialog", lambda parent=None: type(
+        "Approved", (), {"exec": lambda s: 1, "token": "gho_account"})())
+    dlg = providersui.ProvidersDialog(settings)
+    dlg._add_copilot()
+    p = dlg._current()
+    assert p["kind"] == "copilot" and p["api_key"] == "gho_account"
+    assert not dlg.form.isRowVisible(dlg.url) and dlg.form.isRowVisible(dlg.sign_in)
+    assert wait(app, lambda: "octocat" in dlg.account.text(), 10)
+    assert wait(app, lambda: dlg.model.count() == 2, 10)  # FakeOpenAI lists two models (no capabilities)
+    dlg.accept()
+    saved = assistant.active_provider(settings)
+    assert saved["kind"] == "copilot" and saved["account"] == "octocat" and saved["api_key"] == "gho_account"
 
 
 def test_error_excerpt_and_context():

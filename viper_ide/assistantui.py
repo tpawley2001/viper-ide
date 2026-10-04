@@ -281,12 +281,12 @@ class AssistantPanel(QWidget):
                     fn(value)
             return wrapper
 
-        run_async(assistant.list_models, provider["base_url"], assistant.api_key(provider),
+        run_async(assistant.provider_models, dict(provider),
                   on_done=guarded(done), on_error=guarded(failed))
 
     def _no_server(self) -> None:
-        self.bar.show_message("info", "Add an AI provider (OpenAI, OpenRouter, Gemini, Ollama, LM Studio, or any "
-                              "OpenAI-compatible server) to use the assistant.",
+        self.bar.show_message("info", "Add an AI provider (GitHub Copilot sign-in, OpenAI, OpenRouter, Gemini, Ollama, "
+                              "LM Studio, or any OpenAI-compatible server) to use the assistant.",
                               [("Add Provider...", self.manage_providers, True)], tag="setup")
 
     # ------------------------------------------------------------- chatting
@@ -426,7 +426,7 @@ class AssistantPanel(QWidget):
         self._cancel = cancel = threading.Event()
         self._set_busy(True, "Waiting for the model...")
         self._render()
-        run_async(assistant.stream_chat, provider["base_url"], assistant.api_key(provider),
+        run_async(assistant.provider_chat, dict(provider),
                   self.model.currentText().strip(), messages, cancel=cancel,
                   on_progress=lambda t: self._progress(cancel, t),
                   on_done=lambda reply: self._finished(cancel, reply, None),

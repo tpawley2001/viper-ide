@@ -35,8 +35,9 @@ missing** to *Ask* (default), *Install automatically* or *Never offer*.
 
 ## AI Assistant
 
-Connect Viper to any **OpenAI-compatible** chat server (OpenAI, OpenRouter, llama.cpp /
-llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your code without leaving the editor.
+Connect Viper to **GitHub Copilot** (sign in with GitHub, no API key) or any **OpenAI-compatible** chat
+server (OpenAI, OpenRouter, llama.cpp / llama-swap, Ollama, LM Studio, vLLM...) and ask it to change your
+code without leaving the editor.
 
 1. **Add a provider**: press **Manage...** in the AI Assistant panel (or **Settings → Manage AI Providers**,
    or **Code → AI Provider**), then **Add** a preset (OpenAI, OpenRouter, Google Gemini, Groq, Mistral,
@@ -78,6 +79,14 @@ their most recent 12,000 characters. This works even with **Send the current fil
 
 The chat follows the newest text. Scroll up to read and it stays put; scroll back down, or send a
 message, and it follows again.
+
+**GitHub Copilot, no API key:** **Add → GitHub Copilot (sign in, no API key)** opens GitHub's device
+sign-in. Viper shows a short code, copies it and opens github.com/login/device; approve there and you're
+done. This is the same sign-in the Copilot editor plugins use. Chats run on your Copilot plan, so any GitHub
+account with Copilot works, including the free **Copilot Free** plan (turn it on at
+github.com/settings/copilot). **Test & Load Models** lists the chat models your plan offers (GPT, Claude,
+Gemini...). The GitHub sign-in is stored in Viper's settings file; **Sign in Again...** replaces it, and you
+can revoke it any time under GitHub → Settings → Applications.
 
 **Switching providers:** add as many as you like and switch from the drop-down at the top of the panel or
 **Code → AI Provider**. Each provider remembers its own model, and its key is sent only to its own server.
@@ -194,7 +203,7 @@ that lack a system libGL.
 | `viper_ide/packages.py` | Queued pip runner and on-demand formatter tools |
 | `viper_ide/intel.py` | Jedi + pyflakes worker thread, outline |
 | `viper_ide/helpers/` | Scripts that run inside the *user's* interpreter: `find_missing.py`, `viper_dbg.py` (debugger backend, JSON over a localhost socket) |
-| `viper_ide/assistant.py`, `assistantui.py`, `providersui.py` | AI Assistant: providers and presets, OpenAI-compatible streaming client, SEARCH/REPLACE edit parsing and applying, chat dock, Manage Providers dialog |
+| `viper_ide/assistant.py`, `assistantui.py`, `providersui.py`, `copilot.py` | AI Assistant: providers and presets, GitHub Copilot sign-in, OpenAI-compatible streaming client, SEARCH/REPLACE edit parsing and applying, chat dock, Manage Providers dialog |
 | `viper_ide/updater.py`, `updateui.py` | Remote self-update: feed check, sha256-verified download, silent installer hand-off |
 | `viper_ide/selftest.py` | `--selftest`, which also runs from the frozen build |
 | `packaging/` | PyInstaller spec, Inno Setup script, `build_windows.ps1` |

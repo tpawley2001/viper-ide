@@ -1,11 +1,80 @@
-"""Manage AI Providers: named OpenAI-compatible servers, each with its own URL, key and model."""
+"""Manage AI Providers: named OpenAI-compatible servers, each with its own URL, key and model,
+plus GitHub Copilot, which signs in with a GitHub account instead of an API key."""
 from __future__ import annotations
 
+import threading
+
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PyQt6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
-from . import assistant
+from . import assistant, copilot
 from .workers import run_async
+
+
+class CopilotSignInDialog(QDialog):
+    """GitHub device-flow sign-in: show the code, open github.com/login/device, wait for approval."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sign in to GitHub Copilot")
+        self.token = ""
+        self._cancel = threading.Event()
+        lay = QVBoxLayout(self)
+        self.info = QLabel("Asking GitHub for a sign-in code...")
+        self.info.setWordWrap(True)
+        self.code = QLabel("")
+        font = QFont(self.code.font())
+        font.setPointSize(font.pointSize() * 2)
+        font.setBold(True)
+        self.code.setFont(font)
+        self.code.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.open_btn = QPushButton("Copy Code && Open GitHub")
+        self.open_btn.setEnabled(False)
+        self.open_btn.clicked.connect(self._open)
+        self.status = QLabel("")
+        self.status.setObjectName("Dim")
+        self.status.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        for w in (self.info, self.code, self.open_btn, self.status, buttons):
+            lay.addWidget(w)
+        self.setMinimumWidth(460)
+        self._flow: dict = {}
+        run_async(copilot.start_sign_in, on_done=self._started, on_error=self._failed)
+
+    def _started(self, flow: dict) -> None:
+        if self._cancel.is_set():
+            return
+        self._flow = flow
+        self.info.setText(f"Enter this code at {flow.get('verification_uri', 'https://github.com/login/device')} "
+                          "and approve access. Any GitHub account with Copilot works, including the free plan.")
+        self.code.setText(flow.get("user_code", ""))
+        self.open_btn.setEnabled(True)
+        self.status.setText("Waiting for you to approve on GitHub...")
+        self.adjustSize()
+        self._open()
+        run_async(copilot.finish_sign_in, flow, self._cancel, on_done=self._signed_in, on_error=self._failed)
+
+    def _open(self) -> None:
+        QGuiApplication.clipboard().setText(self._flow.get("user_code", ""))
+        QDesktopServices.openUrl(QUrl(self._flow.get("verification_uri") or "https://github.com/login/device"))
+
+    def _signed_in(self, token: str) -> None:
+        if self._cancel.is_set():
+            return
+        self.token = token
+        self.accept()
+
+    def _failed(self, msg: str) -> None:
+        if not self._cancel.is_set():
+            self.status.setText(msg.split(": ", 1)[-1] if "Error: " in msg else msg)
+
+    def done(self, result: int) -> None:
+        self._cancel.set()
+        super().done(result)
 
 
 class ProvidersDialog(QDialog):
@@ -25,6 +94,8 @@ class ProvidersDialog(QDialog):
         row = QHBoxLayout()
         add = QPushButton("Add")
         menu = QMenu(add)
+        menu.addAction(assistant.COPILOT_PRESET, self._add_copilot)
+        menu.addSeparator()
         for name, url, env in assistant.PRESETS:
             menu.addAction(name, lambda n=name, u=url, e=env: self._add(n, u, e))
         menu.addSeparator()
@@ -53,12 +124,19 @@ class ProvidersDialog(QDialog):
         self.test_result = QLabel()
         self.test_result.setObjectName("Dim")
         self.test_result.setWordWrap(True)
+        self.sign_in = QPushButton("Sign in with GitHub")
+        self.sign_in.clicked.connect(self._sign_in)
+        self.account = QLabel()
+        self.account.setWordWrap(True)
         self.use = QPushButton("Use This Provider")
         self.use.clicked.connect(self._make_active)
-        for label, w in (("Name", self.name), ("Server URL", self.url), ("API key", self.key),
-                         ("Key from env var", self.env), ("Model", self.model), ("", test),
-                         ("", self.test_result), ("", self.use)):
+        self._rows = {}
+        for label, w in (("Name", self.name), ("GitHub", self.account), ("", self.sign_in),
+                         ("Server URL", self.url), ("API key", self.key), ("Key from env var", self.env),
+                         ("Model", self.model), ("", test), ("", self.test_result), ("", self.use)):
             form.addRow(label, w)
+            self._rows[w] = form
+        self.form = form
         for w in (self.name, self.url, self.key, self.env):
             w.textEdited.connect(self._store)
         self.model.currentTextChanged.connect(self._store)
@@ -68,7 +146,8 @@ class ProvidersDialog(QDialog):
         body.addWidget(self.form_box, 3)
         lay = QVBoxLayout(self)
         note = QLabel("Keys are saved in Viper's settings file in plain text. Leave the key blank for local "
-                      "servers, or name an environment variable to read it from instead.")
+                      "servers, or name an environment variable to read it from instead. GitHub Copilot needs "
+                      "no key: sign in with your GitHub account and it uses your Copilot plan.")
         note.setObjectName("Dim")
         note.setWordWrap(True)
         lay.addLayout(body, 1)
@@ -110,6 +189,27 @@ class ProvidersDialog(QDialog):
         self._refill(p["name"])
         (self.url if not url else self.key if env else self.model).setFocus()
 
+    def _add_copilot(self) -> None:
+        p = assistant.new_copilot_provider(self._unique("GitHub Copilot"))
+        self.items.append(p)
+        if not self.active:
+            self.active = p["name"]
+        self._refill(p["name"])
+        self._sign_in()
+
+    def _sign_in(self) -> None:
+        p = self._current()
+        if not assistant.is_copilot(p):
+            return
+        dlg = CopilotSignInDialog(self)
+        if not dlg.exec() or not dlg.token:
+            return
+        copilot.forget(p.get("api_key") or "")
+        p["api_key"] = dlg.token
+        p.pop("account", None)
+        self._show(self.list.currentRow())
+        self._test()
+
     def _remove(self) -> None:
         p = self._current()
         if not p:
@@ -140,6 +240,16 @@ class ProvidersDialog(QDialog):
             self.model.addItem(p["model"])
         self.model.setCurrentText(p["model"] if p else "")
         self.test_result.setText("")
+        cop = assistant.is_copilot(p)
+        for w in (self.url, self.key, self.env):
+            self.form.setRowVisible(w, not cop)
+        for w in (self.account, self.sign_in):
+            self.form.setRowVisible(w, cop)
+        if cop:
+            signed = bool(p.get("api_key"))
+            self.account.setText((f"Signed in as {p['account']}" if p.get("account") else "Signed in")
+                                 if signed else "Not signed in")
+            self.sign_in.setText("Sign in Again..." if signed else "Sign in with GitHub")
         self.use.setEnabled(bool(p) and p["name"] != self.active)
         self._loading = False
 
@@ -155,9 +265,10 @@ class ProvidersDialog(QDialog):
                 self.active = new
             item = self.list.currentItem()
             item.setText(new + ("   (in use)" if new == self.active else ""))
-        p["base_url"] = self.url.text().strip()
-        p["api_key"] = self.key.text().strip()
-        p["env_key"] = self.env.text().strip()
+        if not assistant.is_copilot(p):
+            p["base_url"] = self.url.text().strip()
+            p["api_key"] = self.key.text().strip()
+            p["env_key"] = self.env.text().strip()
         p["model"] = self.model.currentText().strip()
 
     def _test(self) -> None:
@@ -187,11 +298,19 @@ class ProvidersDialog(QDialog):
             if cur and cur["name"] == name:
                 self.test_result.setText(msg)
 
-        run_async(assistant.list_models, p["base_url"], assistant.api_key(p), on_done=done, on_error=failed)
+        run_async(assistant.provider_models, dict(p), on_done=done, on_error=failed)
+        if assistant.is_copilot(p) and p.get("api_key") and not p.get("account"):
+            def named(login, token=p["api_key"]):
+                if login and p.get("api_key") == token:
+                    p["account"] = login
+                    if self._current() is p:
+                        self.account.setText(f"Signed in as {login}")
+            run_async(copilot.account_name, p["api_key"], on_done=named)
 
     def accept(self) -> None:
         self._store()
-        blank = [p["name"] for p in self.items if not p["name"].strip() or not p["base_url"].strip()]
+        blank = [p["name"] for p in self.items if not p["name"].strip()
+                 or not (p["base_url"].strip() or assistant.is_copilot(p))]
         if blank:
             QMessageBox.warning(self, "AI Providers", "Every provider needs a name and a server URL:\n\n"
                                 + "\n".join(n or "(unnamed)" for n in blank))

@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import __version__
+from . import __version__, copilot
 
 USER_AGENT = f"ViperIDE/{__version__}"
 MAX_FILE_CHARS = 120_000
@@ -108,8 +108,21 @@ PRESETS = [
 ]
 
 
-def new_provider(name: str = "", base_url: str = "", env_key: str = "") -> dict:
-    return {"name": name, "base_url": base_url, "api_key": "", "env_key": env_key, "model": ""}
+COPILOT_PRESET = "GitHub Copilot (sign in, no API key)"
+
+
+def new_provider(name: str = "", base_url: str = "", env_key: str = "", kind: str = "") -> dict:
+    """``kind`` is "" for an OpenAI-compatible server, or "copilot" for GitHub Copilot sign-in,
+    whose ``api_key`` holds the GitHub account token from signing in."""
+    return {"name": name, "base_url": base_url, "api_key": "", "env_key": env_key, "model": "", "kind": kind}
+
+
+def new_copilot_provider(name: str = "GitHub Copilot") -> dict:
+    return new_provider(name, copilot.DEFAULT_API, kind="copilot")
+
+
+def is_copilot(provider: dict | None) -> bool:
+    return bool(provider) and provider.get("kind") == "copilot"
 
 
 def providers(settings) -> list[dict]:
@@ -158,8 +171,9 @@ def api_key(provider: dict | None) -> str:
     return (provider.get("api_key") or (os.environ.get(env) if env else "") or "").strip()
 
 
-def _request(base: str, path: str, key: str, body: dict | None = None) -> urllib.request.Request:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+def _request(base: str, path: str, key: str, body: dict | None = None,
+             extra: dict | None = None) -> urllib.request.Request:
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json", **(extra or {})}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     data = None
@@ -179,24 +193,28 @@ def _http_error(e: urllib.error.HTTPError) -> AssistantError:
     return AssistantError(f"HTTP {e.code}: {detail}")
 
 
-def list_models(base: str, key: str, timeout: float = 10.0) -> list[str]:
+def _models_json(base: str, key: str, timeout: float, headers: dict | None = None):
     base = normalise_base(base)
     if not base:
         raise AssistantError("This AI provider has no server URL. Set one in Manage Providers.")
     try:
-        with urllib.request.urlopen(_request(base, "/models", key), timeout=timeout) as r:
-            data = json.load(r)
+        with urllib.request.urlopen(_request(base, "/models", key, extra=headers), timeout=timeout) as r:
+            return json.load(r)
     except urllib.error.HTTPError as e:
         raise _http_error(e) from None
     except (OSError, ValueError) as e:
         raise AssistantError(f"Couldn't reach {base}: {e}") from None
+
+
+def list_models(base: str, key: str, timeout: float = 10.0, headers: dict | None = None) -> list[str]:
+    data = _models_json(base, key, timeout, headers)
     items = data.get("data", data.get("models", [])) if isinstance(data, dict) else data
     names = [m.get("id") or m.get("name") if isinstance(m, dict) else str(m) for m in items or []]
     return sorted({n for n in names if n}, key=str.lower)
 
 
 def stream_chat(base: str, key: str, model: str, messages: list[dict], temperature: float | None = None,
-                cancel=None, progress=None, timeout: float = 300.0) -> str:
+                cancel=None, progress=None, timeout: float = 300.0, headers: dict | None = None) -> str:
     """Stream a completion, calling ``progress(text_so_far)``; returns the full reply.
 
     ``cancel`` is a threading.Event; setting it stops reading and returns what arrived.
@@ -212,7 +230,7 @@ def stream_chat(base: str, key: str, model: str, messages: list[dict], temperatu
         body["temperature"] = temperature
     text, thinking = [], False
     try:
-        with urllib.request.urlopen(_request(base, "/chat/completions", key, body), timeout=timeout) as r:
+        with urllib.request.urlopen(_request(base, "/chat/completions", key, body, headers), timeout=timeout) as r:
             if "text/event-stream" not in (r.headers.get("Content-Type") or ""):
                 data = json.load(r)
                 return _message_text(data)
@@ -248,6 +266,40 @@ def stream_chat(base: str, key: str, model: str, messages: list[dict], temperatu
             return "".join(text) + f"\n\n[connection lost: {e}]"
         raise AssistantError(f"Couldn't reach {base}: {e}") from None
     return "".join(text)
+
+
+def connection(provider: dict) -> tuple[str, str, dict | None]:
+    """(base URL, bearer key, extra headers) for a provider. Network call for Copilot; run it off the GUI thread."""
+    if not is_copilot(provider):
+        return provider.get("base_url") or "", api_key(provider), None
+    try:
+        base, token = copilot.session(provider.get("api_key") or "")
+    except copilot.CopilotError as e:
+        raise AssistantError(str(e)) from None
+    return base, token, copilot.CHAT_HEADERS
+
+
+def _with_connection(provider: dict, call):
+    """Run ``call(base, key, headers)``; a Copilot session the server rejects is renewed once."""
+    base, key, headers = connection(provider)
+    try:
+        return call(base, key, headers)
+    except AssistantError as e:
+        if not (is_copilot(provider) and str(e).startswith("HTTP 401")):
+            raise
+    copilot.forget(provider.get("api_key") or "")
+    return call(*connection(provider))
+
+
+def provider_models(provider: dict, timeout: float = 10.0) -> list[str]:
+    if is_copilot(provider):
+        return _with_connection(provider, lambda b, k, h: copilot.chat_models(_models_json(b, k, timeout, h)))
+    return list_models(provider.get("base_url") or "", api_key(provider), timeout)
+
+
+def provider_chat(provider: dict, model: str, messages: list[dict], **kwargs) -> str:
+    """``stream_chat`` against a saved provider (OpenAI-compatible server or GitHub Copilot)."""
+    return _with_connection(provider, lambda b, k, h: stream_chat(b, k, model, messages, headers=h, **kwargs))
 
 
 def _message_text(data: dict) -> str:
