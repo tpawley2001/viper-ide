@@ -21,9 +21,9 @@ jobs:
       PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG || 'viper-ide' }}
       POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.14"
 
@@ -52,7 +52,7 @@ jobs:
       - name: Upload unsigned app
         id: unsigned-app
         if: env.SIGN == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ViperIDE-unsigned
           path: dist/ViperIDE/
@@ -77,7 +77,7 @@ jobs:
       - name: Upload unsigned installer
         id: unsigned-installer
         if: env.SIGN == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ViperIDE-Setup-unsigned
           path: dist/ViperIDE_Setup_${{ steps.version.outputs.version }}.exe
@@ -107,7 +107,7 @@ jobs:
           }
 
       - name: Keep build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ViperIDE-${{ steps.version.outputs.version }}
           path: |
