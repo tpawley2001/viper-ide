@@ -73,6 +73,10 @@ class IntelEngine(QObject):
     def _script(self, req: dict):
         import jedi
 
+        from .paths import data_dir, is_portable
+
+        if is_portable():  # Jedi's parser cache defaults to %LOCALAPPDATA%\Jedi
+            jedi.settings.cache_directory = str(data_dir() / "jedi")
         path = req.get("path") or None
         root = req.get("project") or (os.path.dirname(path) if path else os.getcwd())
         interp = req.get("interpreter") or ""

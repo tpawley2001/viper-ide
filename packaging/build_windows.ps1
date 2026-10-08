@@ -1,4 +1,4 @@
-﻿# Build Viper IDE on Windows: PyInstaller bundle + Inno Setup installer.
+﻿# Build Viper IDE on Windows: PyInstaller bundle, portable zip, and Inno Setup installer.
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 [-SkipInstaller] [-SelfTest]
 # Keep this file plain ASCII with CRLF line endings and a UTF-8 BOM (Windows PowerShell 5.1).
 param(
@@ -35,6 +35,28 @@ if ($SelfTest) {
     if (Test-Path $result) { Get-Content $result }
     if ($p.ExitCode -ne 0) { throw 'Self test failed' }
 }
+
+# Portable zip: the same bundle plus portable.txt, which keeps settings and data in Data\ beside the exe.
+$portableDir = Join-Path $root 'build\portable\ViperIDE'
+if (Test-Path (Split-Path $portableDir)) { Remove-Item (Split-Path $portableDir) -Recurse -Force }
+New-Item -ItemType Directory -Force (Split-Path $portableDir) | Out-Null
+Copy-Item 'dist\ViperIDE' $portableDir -Recurse
+Set-Content -Path (Join-Path $portableDir 'portable.txt') -Encoding ASCII -Value @(
+    'Viper IDE portable. While this file is here, settings, downloaded Pythons, venvs and tools',
+    'are kept in the Data folder next to ViperIDE.exe. Delete it to use the per-user folders instead.')
+$pathsJson = Join-Path $root 'build\portable-paths.json'
+$p = Start-Process -FilePath (Join-Path $portableDir 'ViperIDE.exe') -ArgumentList @('--paths', $pathsJson) -Wait -PassThru
+$paths = Get-Content $pathsJson -Raw | ConvertFrom-Json
+Write-Host "Portable data folder: $($paths.data)"
+if ($p.ExitCode -ne 0 -or -not $paths.portable -or -not $paths.data.StartsWith($portableDir)) {
+    throw 'Portable copy does not keep its data beside the exe'
+}
+Remove-Item (Join-Path $portableDir 'Data') -Recurse -Force -ErrorAction SilentlyContinue
+$zip = Join-Path $root "dist\ViperIDE_Portable_$version.zip"
+if (Test-Path $zip) { Remove-Item $zip }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($portableDir, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+Get-Item $zip | Format-List Name, Length
 
 if (-not $SkipInstaller) {
     $iscc = @(

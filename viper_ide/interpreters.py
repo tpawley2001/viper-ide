@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import child_env, downloads_dir, helper, pythons_dir, subprocess_flags
+from .paths import child_env, downloads_dir, helper, is_portable, pythons_dir, subprocess_flags
 
 IS_WIN = os.name == "nt"
 USER_AGENT = "ViperIDE"
@@ -346,6 +346,9 @@ def install_python(version: str, progress=None) -> Interpreter:
     if (existing := probe(str(exe))):
         return existing
     say = progress or (lambda _msg: None)
+    if is_portable():
+        # The python.org installer registers itself with Windows; a portable copy must stay in its folder.
+        return install_nuget_python(version, progress)
     installer = downloads_dir() / Path(installer_url(version)).name
     try:
         if not installer.is_file():

@@ -96,3 +96,59 @@ def test_unsafe_manifest_file_rejected(server, monkeypatch, file):
     monkeypatch.setattr(updater, "default_bases", lambda: [])
     release, errors = updater.check(Settings(update_urls=[base]))
     assert release is None and "unsafe" in errors[0]
+
+
+def test_portable_copy_takes_the_zip(server):
+    root, base = server
+    zip_bytes = b"zip-bytes"
+    publish(root)
+    manifest = json.loads((root / "version.json").read_text())
+    manifest["portable"] = {"file": "ViperIDE_Portable_9.1.0.zip", "sha256": hashlib.sha256(zip_bytes).hexdigest(),
+                            "size": len(zip_bytes)}
+    (root / "version.json").write_text(json.dumps(manifest))
+    (root / "ViperIDE_Portable_9.1.0.zip").write_bytes(zip_bytes)
+    assert updater.fetch_manifest(base, portable=False).file == "ViperIDE_Setup_9.1.0.exe"
+    rel = updater.fetch_manifest(base, portable=True)
+    assert (rel.file, rel.size, rel.version) == ("ViperIDE_Portable_9.1.0.zip", len(zip_bytes), "9.1.0")
+
+
+def test_portable_copy_refuses_feed_without_zip(server):
+    root, base = server
+    publish(root)
+    with pytest.raises(updater.UpdateError, match="no portable build"):
+        updater.fetch_manifest(base, portable=True)
+
+
+def test_portable_manifest_rejects_installer_name(server):
+    root, base = server
+    publish(root)
+    manifest = json.loads((root / "version.json").read_text())
+    manifest["portable"] = {"file": "evil.exe", "sha256": "0" * 64}
+    (root / "version.json").write_text(json.dumps(manifest))
+    with pytest.raises(updater.UpdateError, match="unsafe zip"):
+        updater.fetch_manifest(base, portable=True)
+
+
+def test_extract_portable_finds_the_app_folder(tmp_path):
+    import zipfile
+
+    archive = tmp_path / "p.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("ViperIDE/ViperIDE.exe", b"exe")
+        z.writestr("ViperIDE/portable.txt", b"marker")
+        z.writestr("ViperIDE/_internal/x.dll", b"dll")
+    staged = updater.extract_portable(archive, tmp_path / "stage")
+    assert staged == tmp_path / "stage" / "ViperIDE"
+    assert (staged / "_internal" / "x.dll").read_bytes() == b"dll"
+
+
+def test_extract_portable_rejects_path_traversal(tmp_path):
+    import zipfile
+
+    archive = tmp_path / "p.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("ViperIDE/ViperIDE.exe", b"exe")
+        z.writestr("../escaped.txt", b"nope")
+    with pytest.raises(updater.UpdateError, match="unsafe path"):
+        updater.extract_portable(archive, tmp_path / "stage")
+    assert not (tmp_path / "escaped.txt").exists()

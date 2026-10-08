@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ship the source to the Windows build box over ssh, build there, and copy the installer back.
+# Ship the source to the Windows build box over ssh, build there, and copy the installer and portable zip back.
 #   scripts/build_on_winbox.sh [--selftest]      (host alias via WINBOX, default "winbox")
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,5 +18,6 @@ ssh "$host" "powershell -NoProfile -ExecutionPolicy Bypass -File $remote\\packag
 version=$(python3 -c "import re;print(re.search(r'__version__ = \"([^\"]+)\"', open('$here/viper_ide/__init__.py').read()).group(1))")
 mkdir -p "$here/dist"
 scp "$host:C:/build/viper-ide/dist/ViperIDE_Setup_${version}.exe" "$here/dist/"
+scp "$host:C:/build/viper-ide/dist/ViperIDE_Portable_${version}.zip" "$here/dist/"
 [ "${1:-}" = "--selftest" ] && scp "$host:C:/build/viper-ide/dist/selftest.json" "$host:C:/build/viper-ide/dist/selftest.png" "$here/dist/" || true
-ls -la "$here/dist/ViperIDE_Setup_${version}.exe"
+ls -la "$here/dist/ViperIDE_Setup_${version}.exe" "$here/dist/ViperIDE_Portable_${version}.zip"

@@ -7,6 +7,9 @@ import sys
 from pathlib import Path
 
 APP_DIR_NAME = "ViperIDE"
+# A portable copy is the frozen app folder plus this marker; it keeps everything in Data\ beside the exe.
+PORTABLE_MARKER = "portable.txt"
+PORTABLE_DATA = "Data"
 
 
 def is_frozen() -> bool:
@@ -34,9 +37,30 @@ def _ensure(p: Path) -> Path:
     return p
 
 
+def app_dir() -> Path:
+    """The folder holding ViperIDE.exe (frozen) or the source checkout."""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def portable_root() -> Path | None:
+    """The app folder when this is a portable copy (frozen, marker beside the exe), else None."""
+    if is_frozen() and (app_dir() / PORTABLE_MARKER).is_file():
+        return app_dir()
+    return None
+
+
+def is_portable() -> bool:
+    return portable_root() is not None
+
+
 def _home_override() -> Path | None:
-    v = os.environ.get("VIPER_IDE_HOME")
-    return Path(v) if v else None
+    if (v := os.environ.get("VIPER_IDE_HOME")):
+        return Path(v)
+    if (root := portable_root()):
+        return root / PORTABLE_DATA
+    return None
 
 
 def config_dir() -> Path:

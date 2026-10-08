@@ -9,7 +9,8 @@ you don't have, and installs it for you.
 
 Get the Windows installer (`ViperIDE_Setup_x.y.z.exe`) from
 [Releases](https://github.com/tpawley2001/viper-ide/releases/latest). It installs
-per-user and doesn't need admin rights.
+per-user and doesn't need admin rights. Or get `ViperIDE_Portable_x.y.z.zip`, unzip it and run it
+from anywhere with nothing installed (see [Portable](#portable)).
 
 ## Smart downloads
 
@@ -146,13 +147,25 @@ indentation shifts, and CRLF files stay CRLF. Keys are stored in `settings.json`
 Run `ViperIDE_Setup_<version>.exe`. It installs for the current user by default (no admin
 prompt); choose "Install for all users" in the first dialog to install system-wide. Windows 10/11 x64.
 
+### Portable
+
+`ViperIDE_Portable_<version>.zip` is the same app with nothing to install: unzip it anywhere (a USB
+stick, a folder you can't install into) and run `ViperIDE\ViperIDE.exe`. The `portable.txt` file next to
+the exe switches on portable mode, which keeps settings, downloaded Pythons, venvs, formatter tools,
+Jedi's cache and the log in a `Data` folder beside the exe instead of `%APPDATA%`/`%LOCALAPPDATA%`.
+**Download Python** uses python.org's NuGet package there, because the regular installer registers
+itself with Windows. Delete `portable.txt` to make the copy use the per-user folders. No Start menu
+entry, file association or right-click menu is added. `ViperIDE.exe --paths` prints where a copy keeps
+its data.
+
 ### Updates
 
 Installed copies update themselves. A few seconds after launch Viper reads `version.json` from the
 update server and, if a newer version is published, shows an **Update Now** bar (or use
 **Help → Check for Updates**). The installer is downloaded, **refused unless its sha256 matches the
 manifest**, then run silently. Viper closes (prompting for unsaved files) and reopens on the new
-version.
+version. Portable copies download the portable zip instead, and once Viper exits they copy it over
+their own folder and restart. The copy only adds and overwrites files, so `Data` is never touched.
 
 Feeds are tried in order: **Settings → Update server URLs**, the `VIPER_UPDATE_URLS` environment
 variable (comma separated), then the feeds built into the installer. To point your own builds at your
@@ -163,15 +176,15 @@ URLs you configure. Turn off the startup check in Settings.
 Publish a build (after `scripts/build_on_winbox.sh`):
 
 ```bash
-scripts/publish_update.sh "What changed"      # copies dist/ViperIDE_Setup_<version>.exe + writes version.json
+scripts/publish_update.sh "What changed"      # copies the installer + portable zip from dist/, writes version.json
 ```
 
 It writes the installer and then, atomically, `version.json` (`versionName`, `versionCode`, `file`,
-`sha256`, `size`, `publishedAt`, `notes`) into `VIPER_UPDATE_DIR` (default `/var/www/html/viper/windows`),
-and keeps the three newest installers. Bump `__version__` in `viper_ide/__init__.py` before building.
+`sha256`, `size`, `publishedAt`, `notes`, plus `portable`: `{file, sha256, size}` for the zip) into `VIPER_UPDATE_DIR` (default `/var/www/html/viper/windows`),
+and keeps the three newest installers and zips. Bump `__version__` in `viper_ide/__init__.py` before building.
 
 Settings live in `%APPDATA%\ViperIDE\settings.json`. Downloaded Pythons, formatter tools and
-the log (`viper.log`) are in `%LOCALAPPDATA%\ViperIDE`.
+the log (`viper.log`) are in `%LOCALAPPDATA%\ViperIDE` (in `Data` beside the exe for a portable copy).
 
 ## Development
 

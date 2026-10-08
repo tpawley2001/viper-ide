@@ -196,3 +196,23 @@ def test_debugger_runs_to_end_without_breakpoints(tmp_path):
     events, out, _ = _debug_session(tmp_path, "import json\nprint(json.dumps([1]))\n", [], {})
     assert not [e for e in events if e["event"] == "stopped"]
     assert out.strip() == "[1]"
+
+
+def test_portable_copy_keeps_data_beside_exe(tmp_path, monkeypatch):
+    from viper_ide import paths
+
+    exe = tmp_path / "ViperIDE" / "ViperIDE.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    monkeypatch.delenv("VIPER_IDE_HOME", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    assert paths.portable_root() is None  # installed copy: no marker
+    assert exe.parent not in paths.config_dir().parents
+    (exe.parent / paths.PORTABLE_MARKER).write_text("portable")
+    assert paths.portable_root() == exe.parent
+    assert paths.config_dir() == exe.parent / "Data" / "config"
+    assert paths.pythons_dir() == exe.parent / "Data" / "data" / "pythons"
+    monkeypatch.setenv("VIPER_IDE_HOME", str(tmp_path / "override"))
+    assert paths.config_dir() == tmp_path / "override" / "config"
+    assert "VIPER_IDE_HOME" not in paths.child_env()

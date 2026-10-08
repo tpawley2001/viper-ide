@@ -69,9 +69,9 @@ class UpdateDialog(QDialog):
 
     def _downloaded(self, path) -> None:
         self.bar.setRange(0, 0)
-        self.status.setText("Starting the installer. Viper will close and reopen on the new version.")
+        self.status.setText("Starting the update. Viper will close and reopen on the new version.")
         try:
-            updater.install(path)
+            updater.apply(path)
         except (updater.UpdateError, OSError) as e:
             self._failed(str(e))
             return
