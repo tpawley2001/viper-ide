@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for Viper IDE. Build with:  python -m PyInstaller --noconfirm packaging/ViperIDE.spec
 # Paths are plain Python strings here, so nothing gets re-quoted by a shell.
+import fnmatch
 import os
 import re
 import sys
@@ -26,11 +27,35 @@ a = Analysis(
     pathex=[ROOT],
     datas=datas,
     hiddenimports=["pyflakes", "pyflakes.api", "pydoc", "pydoc_data.topics", "tomllib", "PyQt6.Qsci",
-                   "PyQt6.QtNetwork", "viper_ide.app", "viper_ide.selftest"],
-    excludes=["tkinter", "_tkinter", "PyQt6.QtWebEngineCore", "PyQt6.QtWebEngineWidgets", "PyQt6.QtQml",
-              "PyQt6.QtQuick", "PyQt6.QtMultimedia", "PyQt6.QtPdf", "PyQt6.QtBluetooth", "PyQt6.Qt3DCore"],
+                   "PyQt6.QtNetwork", "PyQt6.QtWebEngineCore", "PyQt6.QtWebEngineWidgets",
+                   "viper_ide.app", "viper_ide.selftest"],
+    # Qt WebEngine stays in: the Microsoft Copilot window (copilotweb.py) is a browser.
+    excludes=["tkinter", "_tkinter", "PyQt6.QtMultimedia", "PyQt6.QtPdf", "PyQt6.QtBluetooth", "PyQt6.Qt3DCore"],
     noarchive=False,
 )
+
+# Qt WebEngine drags in Chromium debug data, 50+ UI languages and Qt Quick/3D modules that a plain
+# browser window never loads (~170 MB unpacked). The selftest's copilot_window check catches over-pruning.
+_DROP = [
+    "pyqt6/qt6/resources/*.debug.*", "pyqt6/qt6/resources/qtwebengine_devtools_resources.pak",
+    "pyqt6/qt6/qml/*",
+    *(f"pyqt6/qt6/bin/qt6{m}*.dll" for m in (
+        "quick3d", "quickcontrols2", "quickdialogs", "quicktemplates2", "quickparticles", "quickeffects",
+        "quicktimeline", "quickvectorimage", "pdfquick", "multimedia", "spatialaudio", "remoteobjects", "test",
+        "shadertools", "sensors", "texttospeech", "websockets", "statemachine", "positioningquick")),
+]
+_KEEP_LOCALES = {"en-us.pak", "en-gb.pak"}
+
+
+def _keep(entry):
+    dest = entry[0].replace("\\", "/").lower()
+    if "/qtwebengine_locales/" in dest:
+        return dest.rsplit("/", 1)[-1] in _KEEP_LOCALES
+    return not any(fnmatch.fnmatch(dest, pat) for pat in _DROP)
+
+
+a.binaries = [e for e in a.binaries if _keep(e)]
+a.datas = [e for e in a.datas if _keep(e)]
 pyz = PYZ(a.pure)
 
 version_info = None

@@ -107,6 +107,9 @@ def main(argv: list[str]) -> int:
         from .settings import Settings
         from .theme import apply_app_theme, theme
 
+        from . import copilotweb
+
+        copilotweb.prepare_app()
         app = QApplication.instance() or QApplication([sys.argv[0]])
         apply_app_theme(app, theme("dark"))
         demo = work / "demo.py"
@@ -193,6 +196,53 @@ def main(argv: list[str]) -> int:
         return {"edits": 1}
 
     check("assistant", assistant_roundtrip)
+
+    def copilot_window():
+        # Qt WebEngine (its helper process, resources, locales) only shows up broken in the frozen build.
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from PyQt6.QtWidgets import QApplication
+
+        from . import copilotweb
+
+        page = ("<textarea id=userInput></textarea><button data-testid=submit-button>Send</button><div id=c></div>"
+                "<script>document.querySelector('button').onclick=()=>{const d=document.createElement('div');"
+                "d.setAttribute('data-content','ai-message');d.innerHTML='<p>pong</p><pre><code>x = 2</code></pre>';"
+                "document.getElementById('c').appendChild(d);};</script>").encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+
+        copilotweb.prepare_app()
+        app = QApplication.instance() or QApplication([sys.argv[0]])  # the gui check's one is gone by now
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        win = copilotweb.CopilotWindow(f"http://127.0.0.1:{srv.server_address[1]}/", storage=work / "copilot-web")
+        out = {}
+        try:
+            win.ask("ping", new_chat=False, on_done=lambda r: out.setdefault("reply", r),
+                    on_error=lambda m: out.setdefault("error", m))
+            end = time.monotonic() + 60
+            while not out and time.monotonic() < end:
+                app.processEvents()
+                time.sleep(0.02)
+        finally:
+            win.dispose()
+            srv.shutdown()
+        assert out.get("reply") == "pong\n\n```\nx = 2\n```", out
+        return out
+
+    check("copilot_window", copilot_window)
 
     def update_feed():
         from . import __version__, updater

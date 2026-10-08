@@ -92,6 +92,7 @@ class AssistantPanel(QWidget):
         self._target = None              # (editor, path) the last request was about
         self._pending: tuple | None = None
         self._actions: dict[int, dict] = {}  # transcript index -> the reply's edits / new files
+        self._ms_copilot_turns = 0           # turns of this conversation already in the Copilot window's chat
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
@@ -228,6 +229,7 @@ class AssistantPanel(QWidget):
         if current and current["name"] == name:
             return
         assistant.set_active(self.settings, name)
+        self._ms_copilot_turns = 0  # the Copilot window hasn't seen this conversation
         self.providers_changed()
         if self._transcript:
             self._transcript.append(("note", f"Switched to {name}. The conversation continues with it."))
@@ -426,11 +428,38 @@ class AssistantPanel(QWidget):
         self._cancel = cancel = threading.Event()
         self._set_busy(True, "Waiting for the model...")
         self._render()
+        if assistant.is_ms_copilot(provider):
+            return self._ask_ms_copilot(messages, content, cancel)
         run_async(assistant.provider_chat, dict(provider),
                   self.model.currentText().strip(), messages, cancel=cancel,
                   on_progress=lambda t: self._progress(cancel, t),
                   on_done=lambda reply: self._finished(cancel, reply, None),
                   on_error=lambda msg: self._finished(cancel, None, msg))
+
+    def _ask_ms_copilot(self, messages: list[dict], content: str, cancel) -> None:
+        """Microsoft Copilot keeps its own conversation: the first turn opens a new chat with the instructions
+        and any earlier turns; later turns send only the new message (with its file context)."""
+        from . import copilotweb
+
+        try:
+            win = copilotweb.window()
+        except copilotweb.CopilotError as e:
+            return self._finished(cancel, None, str(e))
+        fresh = self._ms_copilot_turns == 0
+        if fresh:
+            messages = [dict(messages[0], content=messages[0]["content"] + copilotweb.PROMPT_NOTE), *messages[1:]]
+            prompt = assistant.flatten_messages(messages)
+        else:
+            prompt = content
+
+        def done(reply):
+            if cancel is self._cancel:  # not a conversation cleared meanwhile
+                self._ms_copilot_turns += 1
+            self._finished(cancel, reply, None)
+
+        self.status.setText("Sending to the Copilot window...")
+        win.ask(prompt, new_chat=fresh, cancel=cancel, on_progress=lambda t: self._progress(cancel, t),
+                on_done=done, on_error=lambda msg: self._finished(cancel, None, msg))
 
     def stop(self) -> None:
         if self._cancel:
@@ -443,6 +472,7 @@ class AssistantPanel(QWidget):
         self._set_busy(False, "")
         self.history.clear()
         self._transcript.clear()
+        self._ms_copilot_turns = 0
         self._streaming = ""
         self._pending = None
         self._actions.clear()

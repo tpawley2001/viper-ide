@@ -109,6 +109,8 @@ PRESETS = [
 
 
 COPILOT_PRESET = "GitHub Copilot (sign in, no API key)"
+MS_COPILOT_PRESET = "Microsoft Copilot (its own window, sign in with Microsoft)"
+MS_COPILOT_URL = "https://copilot.microsoft.com/"
 
 
 def new_provider(name: str = "", base_url: str = "", env_key: str = "", kind: str = "") -> dict:
@@ -121,8 +123,31 @@ def new_copilot_provider(name: str = "GitHub Copilot") -> dict:
     return new_provider(name, copilot.DEFAULT_API, kind="copilot")
 
 
+def new_ms_copilot_provider(name: str = "Microsoft Copilot") -> dict:
+    return dict(new_provider(name, MS_COPILOT_URL, kind="mscopilot"), model="Copilot")
+
+
 def is_copilot(provider: dict | None) -> bool:
     return bool(provider) and provider.get("kind") == "copilot"
+
+
+def is_ms_copilot(provider: dict | None) -> bool:
+    """Microsoft Copilot runs in a browser window Viper drives, not over HTTP (see copilotweb.py)."""
+    return bool(provider) and provider.get("kind") == "mscopilot"
+
+
+def flatten_messages(messages: list[dict]) -> str:
+    """One message for a chat box that keeps no system prompt or history of ours: instructions, the
+    earlier turns, then the request."""
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    turns = [m for m in messages if m["role"] != "system"]
+    parts = [f"[Instructions]\n{system}"] if system else []
+    if len(turns) > 1:
+        parts.append("[Earlier conversation]\n" + "\n\n".join(
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in turns[:-1]))
+    if turns:
+        parts.append(f"[Request]\n{turns[-1]['content']}" if parts else turns[-1]["content"])
+    return "\n\n".join(parts)
 
 
 def providers(settings) -> list[dict]:
@@ -292,6 +317,8 @@ def _with_connection(provider: dict, call):
 
 
 def provider_models(provider: dict, timeout: float = 10.0) -> list[str]:
+    if is_ms_copilot(provider):
+        return ["Copilot"]  # the model is picked inside Copilot's own window
     if is_copilot(provider):
         return _with_connection(provider, lambda b, k, h: copilot.chat_models(_models_json(b, k, timeout, h)))
     return list_models(provider.get("base_url") or "", api_key(provider), timeout)

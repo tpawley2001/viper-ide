@@ -15,7 +15,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 def app():
     from PyQt6.QtWidgets import QApplication
 
-    return QApplication.instance() or QApplication([])
+    from viper_ide import copilotweb
+
+    copilotweb.prepare_app()
+    return QApplication.instance() or QApplication(["viper-tests"])  # WebEngine needs a program name
 
 
 _windows = []

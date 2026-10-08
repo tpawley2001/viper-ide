@@ -1,5 +1,6 @@
 """Manage AI Providers: named OpenAI-compatible servers, each with its own URL, key and model,
-plus GitHub Copilot, which signs in with a GitHub account instead of an API key."""
+plus GitHub Copilot (signs in with a GitHub account instead of an API key) and Microsoft Copilot
+(driven in its own browser window, see copilotweb.py)."""
 from __future__ import annotations
 
 import threading
@@ -95,6 +96,7 @@ class ProvidersDialog(QDialog):
         add = QPushButton("Add")
         menu = QMenu(add)
         menu.addAction(assistant.COPILOT_PRESET, self._add_copilot)
+        menu.addAction(assistant.MS_COPILOT_PRESET, self._add_ms_copilot)
         menu.addSeparator()
         for name, url, env in assistant.PRESETS:
             menu.addAction(name, lambda n=name, u=url, e=env: self._add(n, u, e))
@@ -119,7 +121,7 @@ class ProvidersDialog(QDialog):
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.lineEdit().setPlaceholderText("model name")
-        test = QPushButton("Test && Load Models")
+        self.test_btn = test = QPushButton("Test && Load Models")
         test.clicked.connect(self._test)
         self.test_result = QLabel()
         self.test_result.setObjectName("Dim")
@@ -147,7 +149,8 @@ class ProvidersDialog(QDialog):
         lay = QVBoxLayout(self)
         note = QLabel("Keys are saved in Viper's settings file in plain text. Leave the key blank for local "
                       "servers, or name an environment variable to read it from instead. GitHub Copilot needs "
-                      "no key: sign in with your GitHub account and it uses your Copilot plan.")
+                      "no key: sign in with your GitHub account and it uses your Copilot plan. Microsoft Copilot "
+                      "runs in its own window, signed in with your Microsoft account.")
         note.setObjectName("Dim")
         note.setWordWrap(True)
         lay.addLayout(body, 1)
@@ -197,8 +200,23 @@ class ProvidersDialog(QDialog):
         self._refill(p["name"])
         self._sign_in()
 
+    def _add_ms_copilot(self) -> None:
+        p = assistant.new_ms_copilot_provider(self._unique("Microsoft Copilot"))
+        self.items.append(p)
+        if not self.active:
+            self.active = p["name"]
+        self._refill(p["name"])
+        self._sign_in()
+
     def _sign_in(self) -> None:
         p = self._current()
+        if assistant.is_ms_copilot(p):
+            from . import copilotweb
+            try:
+                copilotweb.window().bring_up()
+            except copilotweb.CopilotError as e:
+                QMessageBox.warning(self, "Microsoft Copilot", str(e))
+            return
         if not assistant.is_copilot(p):
             return
         dlg = CopilotSignInDialog(self)
@@ -240,12 +258,20 @@ class ProvidersDialog(QDialog):
             self.model.addItem(p["model"])
         self.model.setCurrentText(p["model"] if p else "")
         self.test_result.setText("")
-        cop = assistant.is_copilot(p)
+        cop, ms = assistant.is_copilot(p), assistant.is_ms_copilot(p)
         for w in (self.url, self.key, self.env):
-            self.form.setRowVisible(w, not cop)
+            self.form.setRowVisible(w, not (cop or ms))
         for w in (self.account, self.sign_in):
-            self.form.setRowVisible(w, cop)
-        if cop:
+            self.form.setRowVisible(w, cop or ms)
+        for w in (self.model, self.test_btn, self.test_result):
+            self.form.setRowVisible(w, not ms)
+        self.form.labelForField(self.account).setText("Microsoft" if ms else "GitHub")
+        if ms:
+            self.account.setText("Copilot runs in its own window. Sign in there once with your Microsoft "
+                                 "account; Viper types your requests into it and reads the replies. Pick "
+                                 "Copilot's mode (Quick, Think Deeper...) in that window.")
+            self.sign_in.setText("Open Copilot Window")
+        elif cop:
             signed = bool(p.get("api_key"))
             self.account.setText((f"Signed in as {p['account']}" if p.get("account") else "Signed in")
                                  if signed else "Not signed in")
@@ -265,7 +291,7 @@ class ProvidersDialog(QDialog):
                 self.active = new
             item = self.list.currentItem()
             item.setText(new + ("   (in use)" if new == self.active else ""))
-        if not assistant.is_copilot(p):
+        if not (assistant.is_copilot(p) or assistant.is_ms_copilot(p)):
             p["base_url"] = self.url.text().strip()
             p["api_key"] = self.key.text().strip()
             p["env_key"] = self.env.text().strip()

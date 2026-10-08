@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout
                              QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
                              QPushButton, QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
-from . import APP_NAME, ORG_NAME, __version__, assistant, imports, interpreters, intel, packages, updater
+from . import APP_NAME, ORG_NAME, __version__, assistant, copilotweb, imports, interpreters, intel, packages, updater
 from .assistantui import AssistantPanel
 from .debugui import DebugPanel, DebugSession
 from .dialogs import CommandPalette, RenamePreviewDialog, SettingsDialog
@@ -1795,6 +1795,7 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self.stop_running()
         self.assistant.stop()
+        copilotweb.close_window()  # a second top-level window would keep the app running
         self.console.stop()
         self.terminal.stop()
         self.pip.cancel()
@@ -1828,6 +1829,7 @@ def main(argv: list[str]) -> int:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HillyardTech.ViperIDE")
         except Exception:  # noqa: BLE001
             pass
+    copilotweb.prepare_app()
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
