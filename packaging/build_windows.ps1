@@ -1,9 +1,13 @@
 ﻿# Build Viper IDE on Windows: PyInstaller bundle, portable zip, and Inno Setup installer.
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 [-SkipInstaller] [-SelfTest]
+# CI signs the app between two stages: -BundleOnly (PyInstaller + self test), then -PackageOnly
+# (portable zip + installer from the existing dist\ViperIDE).
 # Keep this file plain ASCII with CRLF line endings and a UTF-8 BOM (Windows PowerShell 5.1).
 param(
     [switch]$SkipInstaller,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$BundleOnly,
+    [switch]$PackageOnly
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -22,10 +26,13 @@ if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 $version = (& $py -c "import viper_ide; print(viper_ide.__version__)").Trim()
 Write-Host "Building Viper IDE $version"
 
+if (-not $PackageOnly) {
 & $py -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\ViperIDE.spec
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+}
+if (-not (Test-Path 'dist\ViperIDE\ViperIDE.exe')) { throw 'dist\ViperIDE\ViperIDE.exe not found' }
 
-if ($SelfTest) {
+if ($SelfTest -and -not $PackageOnly) {
     $result = Join-Path $root 'dist\selftest.json'
     if (Test-Path $result) { Remove-Item $result }
     $env:QT_QPA_PLATFORM = 'offscreen'
@@ -36,11 +43,19 @@ if ($SelfTest) {
     if ($p.ExitCode -ne 0) { throw 'Self test failed' }
 }
 
+if ($BundleOnly) { exit 0 }
+
+# The privacy statement, with CRLF line endings, for the installer's info page and the portable zip.
+New-Item -ItemType Directory -Force 'build' | Out-Null
+$privacy = Join-Path $root 'build\PRIVACY.txt'
+Set-Content -Path $privacy -Encoding ASCII -Value (Get-Content 'PRIVACY.md')
+
 # Portable zip: the same bundle plus portable.txt, which keeps settings and data in Data\ beside the exe.
 $portableDir = Join-Path $root 'build\portable\ViperIDE'
 if (Test-Path (Split-Path $portableDir)) { Remove-Item (Split-Path $portableDir) -Recurse -Force }
 New-Item -ItemType Directory -Force (Split-Path $portableDir) | Out-Null
 Copy-Item 'dist\ViperIDE' $portableDir -Recurse
+Copy-Item $privacy (Join-Path $portableDir 'PRIVACY.txt')
 Set-Content -Path (Join-Path $portableDir 'portable.txt') -Encoding ASCII -Value @(
     'Viper IDE portable. While this file is here, settings, downloaded Pythons, venvs and tools',
     'are kept in the Data folder next to ViperIDE.exe. Delete it to use the per-user folders instead.')

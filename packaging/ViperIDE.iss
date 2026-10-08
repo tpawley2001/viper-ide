@@ -31,6 +31,7 @@ ChangesAssociations=yes
 CloseApplications=yes
 RestartApplications=yes
 LicenseFile=..\LICENSE
+InfoBeforeFile=..\build\PRIVACY.txt
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

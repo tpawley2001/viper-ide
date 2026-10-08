@@ -11,6 +11,7 @@ Get the Windows installer (`ViperIDE_Setup_x.y.z.exe`) from
 [Releases](https://github.com/tpawley2001/viper-ide/releases/latest). It installs
 per-user and doesn't need admin rights. Or get `ViperIDE_Portable_x.y.z.zip`, unzip it and run it
 from anywhere with nothing installed (see [Portable](#portable)).
+See the [code signing policy](#code-signing-policy) and [privacy statement](PRIVACY.md).
 
 ## Smart downloads
 
@@ -244,6 +245,31 @@ This writes `dist\ViperIDE\` (the app) and `dist\ViperIDE_Setup_<version>.exe`. 
 (`WINBOX` env var, default `winbox`), builds there, and copies the installer back.
 `scripts/win_line_endings.py` keeps the `.ps1`/`.iss` files ASCII with CRLF line endings
 (plus a BOM on `.ps1`), which Windows PowerShell 5.1 needs.
+
+GitHub releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a
+GitHub-hosted Windows runner when a `vX.Y.Z` tag is pushed (the tag must match `__version__`). It
+runs the same script in two stages, `-BundleOnly` then `-PackageOnly`, so SignPath can sign
+`ViperIDE.exe` in between, signs the installer, and attaches both files to a draft release. Signing
+needs the `SIGNPATH_API_TOKEN` secret and the `SIGNPATH_ORGANIZATION_ID` repository variable; without
+them the workflow still builds, unsigned. The SignPath artifact configurations are in
+[`.signpath/artifact-configurations`](.signpath/artifact-configurations).
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+Windows releases on [GitHub Releases](https://github.com/tpawley2001/viper-ide/releases) are built
+from this repository's source by GitHub Actions, and each signing request is approved by hand.
+SignPath signing has been applied for; releases up to 1.9.1 are unsigned.
+
+Team roles:
+
+- Committers and reviewers: [tpawley2001](https://github.com/tpawley2001)
+- Approvers: [tpawley2001](https://github.com/tpawley2001)
+
+Privacy: see the [privacy statement](PRIVACY.md). Viper has no telemetry. It connects to pypi.org
+to look up missing packages (can be turned off) and otherwise only to services you choose to use.
 
 ## License
 

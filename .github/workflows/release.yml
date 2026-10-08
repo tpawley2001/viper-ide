@@ -1,0 +1,131 @@
+# Builds the Windows app from source on GitHub, has SignPath sign it, and attaches the installer and
+# portable zip to a draft release for the tag. Signing runs once the repository has the
+# SIGNPATH_API_TOKEN secret and SIGNPATH_ORGANIZATION_ID variable; until then the build is unsigned.
+# The artifact configurations SignPath uses are kept in .signpath/artifact-configurations/.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    env:
+      SIGN: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG || 'viper-ide' }}
+      POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          version=$(python -c "import viper_ide; print(viper_ide.__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match __version__ $version"; exit 1
+          fi
+
+      - name: Inno Setup
+        shell: powershell
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup install failed' }
+          }
+
+      - name: Build app and self test
+        shell: powershell
+        run: packaging\build_windows.ps1 -SelfTest -BundleOnly
+
+      - name: Upload unsigned app
+        id: unsigned-app
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ViperIDE-unsigned
+          path: dist/ViperIDE/
+
+      - name: Sign app
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.POLICY_SLUG }}
+          artifact-configuration-slug: app
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist/ViperIDE
+
+      - name: Portable zip and installer
+        shell: powershell
+        run: packaging\build_windows.ps1 -PackageOnly
+
+      - name: Upload unsigned installer
+        id: unsigned-installer
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ViperIDE-Setup-unsigned
+          path: dist/ViperIDE_Setup_${{ steps.version.outputs.version }}.exe
+
+      - name: Sign installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist
+
+      - name: Check signatures
+        if: env.SIGN == 'true'
+        shell: powershell
+        run: |
+          $files = @("dist\ViperIDE\ViperIDE.exe", "dist\ViperIDE_Setup_${{ steps.version.outputs.version }}.exe")
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f
+            Write-Host "$f : $($s.Status) $($s.SignerCertificate.Subject)"
+            if ($s.Status -ne 'Valid') { throw "$f is not signed" }
+          }
+
+      - name: Keep build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ViperIDE-${{ steps.version.outputs.version }}
+          path: |
+            dist/ViperIDE_Setup_${{ steps.version.outputs.version }}.exe
+            dist/ViperIDE_Portable_${{ steps.version.outputs.version }}.zip
+            dist/selftest.json
+
+      - name: Attach to draft release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.version.outputs.version }}
+          files="dist/ViperIDE_Setup_$v.exe dist/ViperIDE_Portable_$v.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          else
+            git log -1 --format=%B "$GITHUB_SHA" | grep -v '^Co-Authored-By:' > notes.md
+            gh release create "$GITHUB_REF_NAME" $files --draft --verify-tag --title "Viper IDE $v" --notes-file notes.md
+          fi
