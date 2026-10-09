@@ -2,6 +2,9 @@ import sys
 
 
 def run() -> int:
+    from viper_ide import net
+
+    net.install()
     if "--selftest" in sys.argv:
         from viper_ide.selftest import main as selftest
 
