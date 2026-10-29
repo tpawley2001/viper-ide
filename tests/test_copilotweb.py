@@ -25,16 +25,17 @@ REPLY_HTML = ("<p>Adding <strong>type hints</strong>.</p>"
 PAGE = """<!doctype html><html><body>
 <div id=chat></div>
 %BLOCK%
-<textarea id=userInput maxlength=%MAX%></textarea>
+%INPUT%
 <button data-testid=submit-button id=send disabled>Send</button>
 <script>
 const ta = document.getElementById('userInput'), send = document.getElementById('send'), chat = document.getElementById('chat');
 window.sent = [];
-ta.addEventListener('input', () => { send.disabled = !ta.value; });
+const val = () => ta.isContentEditable ? ta.innerText : ta.value;
+ta.addEventListener('input', () => { send.disabled = !val(); });
 send.addEventListener('click', () => {
-  window.sent.push(ta.value);
-  const u = document.createElement('div'); u.setAttribute('data-content', 'user-message'); u.textContent = ta.value;
-  chat.appendChild(u); ta.value = ''; send.disabled = true;
+  window.sent.push(val());
+  const u = document.createElement('div'); u.setAttribute('data-content', 'user-message'); u.textContent = val();
+  chat.appendChild(u); if (ta.isContentEditable) ta.innerHTML = ''; else ta.value = ''; send.disabled = true;
   const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop responding');
   document.body.appendChild(stop);
   const ai = document.createElement('div'); ai.setAttribute('data-content', 'ai-message'); chat.appendChild(ai);
@@ -51,6 +52,8 @@ send.addEventListener('click', () => {
 
 class FakeCopilot(BaseHTTPRequestHandler):
     signed_out = False
+    landing = False  # copilot.com's signed-out marketing page: no message box at all
+    editable = False  # a contenteditable message box instead of a textarea
     max_length = 10240
 
     def log_message(self, *a):
@@ -58,8 +61,14 @@ class FakeCopilot(BaseHTTPRequestHandler):
 
     def do_GET(self):
         block = "<h1 data-testid=anonymous-block-page-title>Sign in to Copilot</h1>" if FakeCopilot.signed_out else ""
-        body = (PAGE.replace("%BLOCK%", block).replace("%MAX%", str(FakeCopilot.max_length))
-                .replace("%REPLY%", json.dumps(REPLY_HTML)).replace("%%", "%")).encode()
+        box = ("<textarea hidden></textarea><div id=userInput contenteditable=true role=textbox></div>"
+               if FakeCopilot.editable else "<textarea id=userInput maxlength=%MAX%></textarea>")
+        body = (PAGE.replace("%BLOCK%", block).replace("%INPUT%", box).replace("%MAX%", str(FakeCopilot.max_length))
+                .replace("%REPLY%", json.dumps(REPLY_HTML)).replace("%%", "%"))
+        if FakeCopilot.landing:
+            body = ("<!doctype html><title>Microsoft Copilot | Sign in</title><h1>Meet Copilot</h1>"
+                    "<a data-clarity-event=CosmicUnauth_SignIn href='/login'>Sign in</a>")
+        body = body.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -70,7 +79,7 @@ class FakeCopilot(BaseHTTPRequestHandler):
 @pytest.fixture
 def copilot_win(app, tmp_path):
     from test_gui import wait
-    FakeCopilot.signed_out, FakeCopilot.max_length = False, 10240
+    FakeCopilot.signed_out, FakeCopilot.landing, FakeCopilot.editable, FakeCopilot.max_length = False, False, False, 10240
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeCopilot)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     win = copilotweb.CopilotWindow(f"http://127.0.0.1:{srv.server_address[1]}/", storage=tmp_path / "web")
@@ -113,6 +122,21 @@ def test_signed_out_brings_the_window_up(copilot_win):
     FakeCopilot.signed_out = True
     out = _ask(copilot_win, "hi")
     assert "Sign in to Copilot" in out["error"] and copilot_win.isVisible()
+
+
+def test_signed_out_landing_page_asks_to_sign_in(copilot_win):
+    FakeCopilot.landing = True
+    out = _ask(copilot_win, "hi")
+    assert "Sign in to Copilot" in out["error"] and copilot_win.isVisible()
+
+
+def test_contenteditable_message_box(copilot_win):
+    FakeCopilot.editable = True
+    out = _ask(copilot_win, "Add type hints")
+    assert out.get("reply", "").startswith("Adding **type hints**."), out
+    copilot_win.page.runJavaScript("window.sent", lambda v: setattr(copilot_win, "_sent", v))
+    assert copilot_win.wait(lambda: getattr(copilot_win, "_sent", None) is not None)
+    assert copilot_win._sent == ["Add type hints"]
 
 
 def test_sign_in_popup_opens_and_closes(copilot_win):

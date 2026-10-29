@@ -1,4 +1,4 @@
-"""Microsoft Copilot in its own window: no API, Viper types into copilot.microsoft.com and reads the reply.
+"""Microsoft Copilot in its own window: no API, Viper types into copilot.com and reads the reply.
 
 The window is a small browser with its own saved profile, so you sign in to your Microsoft account
 once and Viper stays signed in. Asking means: (optionally) start a new Copilot chat, put the prompt
@@ -11,6 +11,7 @@ and ``dump_page()`` saves the live DOM for fixing them.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
@@ -18,7 +19,9 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidg
 
 from . import paths
 
-COPILOT_URL = "https://copilot.microsoft.com/"
+log = logging.getLogger("viper")
+
+COPILOT_URL = "https://copilot.com/"  # copilot.microsoft.com now redirects here
 # Copilot renders Markdown, which would turn ``=======`` into a heading and ``>>>>>>>`` into quotes.
 PROMPT_NOTE = ("\n\nThis chat renders Markdown, so put every SEARCH/REPLACE edit block and every NEW FILE block "
                "inside its own ```text code fence (one fence per block), exactly as specified above.")
@@ -27,11 +30,16 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
               "Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 
 SELECTORS = {
-    "input": "textarea#userInput, textarea[data-testid='composer-input'], textarea",
+    "input": ("textarea#userInput, textarea[data-testid='composer-input'], [contenteditable='true'][role='textbox'], "
+              "textarea, div[contenteditable='true']"),
     "send": "button[data-testid='submit-button'], button[aria-label*='Submit' i], button[aria-label*='Send' i]",
     "stop": "button[data-testid='stop-button'], button[aria-label*='Stop' i]",
-    "reply": "[data-content='ai-message'], [data-testid='ai-message'], [data-author='bot']",
+    "reply": ("[data-content='ai-message'], [data-testid='ai-message'], [data-author='bot'], "
+              "[data-message-author-role='assistant'], [data-testid*='ai-message' i], [data-testid*='bot-message' i]"),
     "signed_out": "[data-testid='anonymous-block-page-title']",
+    # The signed-out copilot.com landing page has no message box, only these sign-in links.
+    "sign_in": ("a[data-clarity-event*='SignIn'], a[href*='copilot.com/login'], a[href*='login.live.com'], "
+                "[data-bi-cn='GlobalNav_Account_SignIn']"),
 }
 
 POLL_MS = 400
@@ -45,6 +53,8 @@ _JS = r"""
   const S = %SELECTORS%;
   const q = (sel) => document.querySelector(sel);
   const visible = (el) => !!el && el.offsetParent !== null && !el.disabled;
+  // The first visible message box: a hidden textarea mustn't win over the real (possibly contenteditable) one.
+  const box = () => [...document.querySelectorAll(S.input)].find(visible) || null;
   function md(node) {
     let out = '';
     for (const n of node.childNodes) {
@@ -72,15 +82,21 @@ _JS = r"""
   }
   window.__viper = {
     state() {
-      const input = q(S.input);
-      return {signedOut: !!q(S.signed_out), ready: visible(input), busy: visible(q(S.stop)),
-              replies: document.querySelectorAll(S.reply).length,
-              maxLength: input ? input.maxLength : -1, url: location.href};
+      const input = box();
+      return {signedOut: !!q(S.signed_out) || (!input && !!q(S.sign_in)), ready: !!input,
+              busy: visible(q(S.stop)), replies: document.querySelectorAll(S.reply).length,
+              maxLength: input && input.maxLength !== undefined ? input.maxLength : -1, url: location.href,
+              title: document.title};
     },
     send(text) {
-      const input = q(S.input);
+      const input = box();
       if (!input) return 'no message box';
       input.focus();
+      if (input.isContentEditable) {
+        document.execCommand('selectAll');
+        document.execCommand('insertText', false, text);
+        return input.innerText.trim() === text.trim() ? 'ok' : 'the message box rejected the text';
+      }
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
       setter.call(input, text);
       input.dispatchEvent(new Event('input', {bubbles: true}));
@@ -89,7 +105,8 @@ _JS = r"""
     submit() {
       const b = q(S.send);
       if (visible(b)) { b.click(); return 'clicked'; }
-      const input = q(S.input);
+      const input = box();
+      if (!input) return 'no message box';
       for (const type of ['keydown', 'keypress', 'keyup'])
         input.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
                                                      bubbles: true, cancelable: true}));
@@ -274,6 +291,8 @@ class CopilotWindow(QWidget):
 
     def _finish(self, reply: str | None = None, error: str | None = None) -> None:
         job, self._job = self._job, None
+        if error is not None:
+            log.warning("copilot: %s", error)
         self._timer.stop()
         if not job:
             return
@@ -292,7 +311,10 @@ class CopilotWindow(QWidget):
             if cancelled:
                 return self._finish(None, "Stopped.")
             if elapsed > READY_TIMEOUT:
-                return self._finish(None, "Copilot's page didn't become ready. Check the Copilot window.")
+                self.bring_up()
+                page = job.get("page") or "page not loaded"
+                return self._finish(None, f"Copilot's page didn't show a message box ({page}). Check the Copilot "
+                                          f"window. {self._diagnose()}")
             job["pending"] = True
             self._js("window.__viper.state()", self._on_state)
         elif job["stage"] == "reply":
@@ -311,6 +333,7 @@ class CopilotWindow(QWidget):
         job["pending"] = False
         if not isinstance(state, dict):
             return  # page still loading
+        job["page"] = f"{state.get('title') or 'untitled'} at {state.get('url')}"
         if state.get("signedOut"):
             self.bring_up()
             return self._finish(None, "Sign in to Copilot in the Copilot window that just opened (Sign in with "
@@ -337,8 +360,9 @@ class CopilotWindow(QWidget):
         # React needs a moment to see the new value before the send button enables.
         QTimer.singleShot(250, lambda: self._js("window.__viper.submit()", self._on_submitted))
 
-    def _on_submitted(self, _how) -> None:
+    def _on_submitted(self, how) -> None:
         job = self._job
+        log.info("copilot: prompt submitted (%s, %s chars)", how, len(job["prompt"]) if job else "?")
         if job:
             job["pending"] = False
             job["stage"] = "reply"

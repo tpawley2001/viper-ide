@@ -92,7 +92,7 @@ Gemini...). The GitHub sign-in is stored in Viper's settings file; **Sign in Aga
 can revoke it any time under GitHub → Settings → Applications.
 
 **Microsoft Copilot, in its own window:** **Add → Microsoft Copilot** opens a small browser window on
-copilot.microsoft.com. Sign in there once with your Microsoft account. The window keeps its own profile, so
+copilot.com. Sign in there once with your Microsoft account. The window keeps its own profile, so
 it stays signed in (in a portable copy that profile lives in `Data`, so the sign-in travels with the
 folder). When you ask, Viper types the request into Copilot, presses send and reads the reply back,
 including edit blocks for **Review & Apply**. Copilot keeps its own conversation; **Clear** or switching

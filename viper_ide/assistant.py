@@ -110,7 +110,7 @@ PRESETS = [
 
 COPILOT_PRESET = "GitHub Copilot (sign in, no API key)"
 MS_COPILOT_PRESET = "Microsoft Copilot (its own window, sign in with Microsoft)"
-MS_COPILOT_URL = "https://copilot.microsoft.com/"
+MS_COPILOT_URL = "https://copilot.com/"
 
 
 def new_provider(name: str = "", base_url: str = "", env_key: str = "", kind: str = "") -> dict:
