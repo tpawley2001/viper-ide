@@ -1,5 +1,5 @@
 """Viper IDE - a Python IDE with smart package downloads."""
 
-__version__ = "1.10.2"
+__version__ = "1.10.3"
 APP_NAME = "Viper IDE"
 ORG_NAME = "Hillyard Tech"
