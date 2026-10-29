@@ -54,6 +54,7 @@ class FakeCopilot(BaseHTTPRequestHandler):
     signed_out = False
     landing = False  # copilot.com's signed-out marketing page: no message box at all
     editable = False  # a contenteditable message box instead of a textarea
+    hydrate = False  # the message box gets replaced shortly after load, like React taking over the page
     max_length = 10240
 
     def log_message(self, *a):
@@ -65,6 +66,11 @@ class FakeCopilot(BaseHTTPRequestHandler):
                if FakeCopilot.editable else "<textarea id=userInput maxlength=%MAX%></textarea>")
         body = (PAGE.replace("%BLOCK%", block).replace("%INPUT%", box).replace("%MAX%", str(FakeCopilot.max_length))
                 .replace("%REPLY%", json.dumps(REPLY_HTML)).replace("%%", "%"))
+        if FakeCopilot.hydrate:  # the app starts late and swaps in its own box: early typing is lost
+            head, rest = body.split("<script>", 1)
+            js, tail = rest.split("</script>", 1)
+            body = (head + "<script>setTimeout(() => { const o = document.getElementById('userInput'); "
+                    "o.replaceWith(o.cloneNode()); " + js + "}, 700);</script>" + tail)
         if FakeCopilot.landing:
             body = ("<!doctype html><title>Microsoft Copilot | Sign in</title><h1>Meet Copilot</h1>"
                     "<a data-clarity-event=CosmicUnauth_SignIn href='/login'>Sign in</a>")
@@ -80,6 +86,7 @@ class FakeCopilot(BaseHTTPRequestHandler):
 def copilot_win(app, tmp_path):
     from test_gui import wait
     FakeCopilot.signed_out, FakeCopilot.landing, FakeCopilot.editable, FakeCopilot.max_length = False, False, False, 10240
+    FakeCopilot.hydrate = False
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeCopilot)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     win = copilotweb.CopilotWindow(f"http://127.0.0.1:{srv.server_address[1]}/", storage=tmp_path / "web")
@@ -137,6 +144,12 @@ def test_contenteditable_message_box(copilot_win):
     copilot_win.page.runJavaScript("window.sent", lambda v: setattr(copilot_win, "_sent", v))
     assert copilot_win.wait(lambda: getattr(copilot_win, "_sent", None) is not None)
     assert copilot_win._sent == ["Add type hints"]
+
+
+def test_waits_for_the_page_to_settle_before_typing(copilot_win):
+    FakeCopilot.hydrate = True
+    out = _ask(copilot_win, "Add type hints")  # new chat: a fresh load right after the window's own
+    assert out.get("reply", "").startswith("Adding **type hints**."), out
 
 
 def test_sign_in_popup_opens_and_closes(copilot_win):

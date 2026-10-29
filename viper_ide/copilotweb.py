@@ -44,6 +44,8 @@ SELECTORS = {
 
 POLL_MS = 400
 STABLE_POLLS = 6          # reply unchanged this many polls (and no stop button) = finished
+SETTLE_SECS = 1.5         # after a page load, let Copilot's React app take over the message box first
+RESUBMIT_SECS = 5.0       # no sign of the request by then: press send once more
 READY_TIMEOUT = 60.0
 REPLY_TIMEOUT = 600.0
 
@@ -112,6 +114,11 @@ _JS = r"""
                                                      bubbles: true, cancelable: true}));
       return 'enter';
     },
+    resubmit() {  // only while the prompt still sits in the box, so nothing is ever sent twice
+      const input = box();
+      const v = input ? (input.isContentEditable ? input.innerText : input.value) : '';
+      return v && v.trim() ? this.submit() : 'empty';
+    },
     stop() { const b = q(S.stop); if (visible(b)) b.click(); },
     read(before) {
       const all = document.querySelectorAll(S.reply);
@@ -170,6 +177,10 @@ class CopilotWindow(QWidget):
         self.page = Page(self.profile, self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
+        self._loaded_at: float | None = None  # None while a page load is in flight
+        self.page.loadStarted.connect(self._load_started)
+        self.page.loadFinished.connect(self._load_finished)
+        self.page.renderProcessTerminated.connect(self._render_died)
 
         bar = QHBoxLayout()
         for text, tip, slot in (("New Chat", "Start a fresh Copilot conversation", self.new_chat),
@@ -191,7 +202,7 @@ class CopilotWindow(QWidget):
         self._job: dict | None = None
         self._timer = QTimer(self, interval=POLL_MS)
         self._timer.timeout.connect(self._tick)
-        self.view.load(QUrl(url))
+        self.new_chat()
 
     # ------------------------------------------------------------- helpers
     def _js(self, code: str, callback=None) -> None:
@@ -231,7 +242,25 @@ class CopilotWindow(QWidget):
         self.view.reload()  # pick up the new sign-in
 
     def new_chat(self) -> None:
+        self._loaded_at = None  # don't type into the old page while the new one loads
         self.view.load(QUrl(self.url))
+
+    def _load_started(self) -> None:
+        self._loaded_at = None
+
+    def _load_finished(self, ok: bool) -> None:
+        self._loaded_at = time.monotonic()
+        log.info("copilot: page loaded (%s) %s", "ok" if ok else "failed", self.page.url().toString())
+
+    def _render_died(self, status, code) -> None:
+        log.warning("copilot: page process ended (%s, exit code %s)", status, code)
+        if self._job:
+            self._finish(None, "Copilot's page crashed (the window went blank). Viper reloaded it; "
+                               "send your message again.")
+        QTimer.singleShot(500, self.view.reload)
+
+    def _settled(self) -> bool:
+        return self._loaded_at is not None and time.monotonic() - self._loaded_at >= SETTLE_SECS
 
     def bring_up(self) -> None:
         self.showNormal()
@@ -315,12 +344,16 @@ class CopilotWindow(QWidget):
                 page = job.get("page") or "page not loaded"
                 return self._finish(None, f"Copilot's page didn't show a message box ({page}). Check the Copilot "
                                           f"window. {self._diagnose()}")
+            if not self._settled():
+                return
             job["pending"] = True
             self._js("window.__viper.state()", self._on_state)
         elif job["stage"] == "reply":
             if cancelled and not job.get("stopped"):
                 job["stopped"] = True
                 self._js("window.__viper.stop()")
+            if not self._settled():
+                return  # Copilot navigated (e.g. to the new chat's own URL); read once it has loaded
             if elapsed > REPLY_TIMEOUT:
                 return self._finish(job["last"] or None, None if job["last"] else "Copilot didn't answer in time.")
             job["pending"] = True
@@ -378,6 +411,12 @@ class CopilotWindow(QWidget):
             return
         text, busy = r.get("text"), bool(r.get("busy"))
         if text is None:
+            if (not busy and not job.get("resubmitted")
+                    and time.monotonic() - job["started"] > RESUBMIT_SECS):
+                job["resubmitted"] = True
+                log.info("copilot: no reply started, pressing send again")
+                self._js("window.__viper.resubmit()")
+                return
             if time.monotonic() - job["started"] > 45 and not busy:
                 self._finish(None, "Copilot didn't show a reply. If it's waiting on something in its window "
                                    "(sign-in, a captcha, a full conversation), deal with it there and send again. "
